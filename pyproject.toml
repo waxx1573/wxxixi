@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "wechatbot-new"
+name = "wxxixi"
 version = "2.2.5"
 description = "微信智能聊天机器人分支：接入 DeepSeek 等 OpenAI 兼容大模型，支持记忆、情绪表情包、定时任务、联网搜索、WebUI 配置与微信 4.1.x 兼容补丁；底层使用 wechatauto-replica"
 readme = "README.md"
