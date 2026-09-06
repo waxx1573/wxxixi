@@ -1,6 +1,6 @@
 name: astrbot_plugin_smart_core
 display_name: Smart Core
 desc: Smart-style decision, moderation, reply policy and memory hooks for AstrBot.
-version: 0.3.0
+version: 0.4.0
 author: qiuse
 repo: https://github.com/waxx1573/wxxixi

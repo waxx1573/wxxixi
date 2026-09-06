@@ -55,6 +55,25 @@ class Main(star.Star):
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.get_config, ["GET"], "Get Smart Core config")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.save_config, ["POST"], "Save Smart Core config")
 
+    async def initialize(self):
+        manager = self.context.persona_manager
+        existing = {item.persona_id for item in await manager.get_all_personas()}
+        prompt_dir = Path(__file__).parent / "prompts"
+        for name, filename in (
+            ("Casual", "casual"), ("Decision", "decision"),
+            ("Moderation", "moderation"), ("ManageIntent", "manage_intent"),
+        ):
+            persona_id = f"Smart-WeChat-{name}-v1"
+            if persona_id in existing:
+                continue
+            prompt = (prompt_dir / f"{filename}.md").read_text(encoding="utf-8")
+            await manager.create_persona(
+                persona_id=persona_id, system_prompt=prompt,
+                tools=None if name == "Casual" else [],
+                skills=None if name == "Casual" else [],
+            )
+            logger.info("Smart Core: registered native persona %s", persona_id)
+
     def _settings(self):
         defaults = {
             "enabled": True, "reply_mode": "smart", "reply_probability": 1.0,
