@@ -118,12 +118,12 @@ class Main(star.Star):
 
     async def get_config(self):
         data = self._settings()
-        groups = []
+        groups = [dict(x) for x in data.get("groups", []) if isinstance(x, dict) and x.get("id")]
         allowed_ids = []
         try:
             manager = json.loads(self._group_config_path.read_text(encoding="utf-8-sig"))
             raw_groups = manager.get("smart_groups", [])
-            if isinstance(raw_groups, list):
+            if isinstance(raw_groups, list) and not groups:
                 groups = [dict(x) for x in raw_groups if isinstance(x, dict) and x.get("id")]
             allowed_ids = [str(x) for x in manager.get("allowed_group_ids", []) if str(x).strip()]
         except (OSError, json.JSONDecodeError):
@@ -257,6 +257,9 @@ class Main(star.Star):
                             run_level=excluded.run_level, reply_mode=excluded.reply_mode, updated_at=excluded.updated_at""",
                             (group["id"], run_level, group["reply_mode"], rules, quiet[0], quiet[1], time.time()))
                 data["groups"] = clean
+                # AstrBot may sanitize custom fields in the group-manager config;
+                # keep Smart Core's own canonical copy so saved rows survive reloads.
+                self._config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
             except (OSError, json.JSONDecodeError, sqlite3.Error) as exc:
                 logger.warning("Smart Core group config update failed: %s", type(exc).__name__)
                 return json_response({"ok": False, "error": "群管理配置保存失败"})
