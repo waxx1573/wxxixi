@@ -51,6 +51,7 @@ class Main(star.Star):
         self._config_path = Path("/AstrBot/data/astrbot_plugin_smart_core.json")
         self._astrbot_config_path = Path("/AstrBot/data/cmd_config.json")
         self._group_config_path = Path("/AstrBot/data/config/astrbot_plugin_wechat_group_manager_config.json")
+        self._group_names_path = Path("/AstrBot/data/plugin_data/astrbot_plugin_smart_core/group_names.json")
         self._group_db_path = Path("/AstrBot/data/plugin_data/astrbot_plugin_wechat_group_manager/group_manager.sqlite3")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.get_config, ["GET"], "Get Smart Core config")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.save_config, ["POST"], "Save Smart Core config")
@@ -90,23 +91,38 @@ class Main(star.Star):
 
     async def get_config(self):
         data = self._settings()
+        groups = []
+        allowed_ids = []
         try:
             manager = json.loads(self._group_config_path.read_text(encoding="utf-8-sig"))
-            data["groups"] = manager.get("smart_groups", [])
-            if not data["groups"]:
-                data["groups"] = [{"id": x, "name": "", "enabled": True, "ppbot": True, "reply_mode": "mention", "moderation": "standard"} for x in manager.get("allowed_group_ids", [])]
+            raw_groups = manager.get("smart_groups", [])
+            if isinstance(raw_groups, list):
+                groups = [dict(x) for x in raw_groups if isinstance(x, dict) and x.get("id")]
+            allowed_ids = [str(x) for x in manager.get("allowed_group_ids", []) if str(x).strip()]
         except (OSError, json.JSONDecodeError):
-            data["groups"] = []
+            pass
+        names = {}
+        try:
+            saved_names = json.loads(self._group_names_path.read_text(encoding="utf-8-sig"))
+            if isinstance(saved_names, dict):
+                names = {str(k): str(v).strip() for k, v in saved_names.items() if str(v).strip()}
+        except (OSError, json.JSONDecodeError):
+            pass
         try:
             with sqlite3.connect(self._group_db_path) as db:
                 states = {row[0]: {"run_level": row[1], "reply_mode": row[2]} for row in db.execute("SELECT group_id, run_level, reply_mode FROM groups")}
-            for group in data["groups"]:
-                state = states.get(str(group.get("id", "")))
+            by_id = {str(group["id"]): group for group in groups}
+            for group_id in list(states) + allowed_ids:
+                group_id = str(group_id)
+                group = by_id.setdefault(group_id, {"id": group_id, "name": "", "enabled": group_id in allowed_ids, "ppbot": True, "reply_mode": "mention", "moderation": "standard"})
+                group["name"] = str(group.get("name") or names.get(group_id, ""))
+                state = states.get(group_id)
                 if state:
                     group["ppbot"] = state["run_level"] == "active"
                     group["reply_mode"] = state["reply_mode"]
+            data["groups"] = list(by_id.values())
         except (OSError, sqlite3.Error):
-            pass
+            data["groups"] = groups or [{"id": x, "name": names.get(x, ""), "enabled": True, "ppbot": True, "reply_mode": "mention", "moderation": "standard"} for x in allowed_ids]
         try:
             root = json.loads(self._astrbot_config_path.read_text(encoding="utf-8-sig"))
             ps = root.get("provider_settings", {})
@@ -168,6 +184,11 @@ class Main(star.Star):
                 manager["allowed_group_ids"] = [x["id"] for x in clean if x["enabled"]]
                 manager["smart_groups"] = clean
                 self._group_config_path.write_text(json.dumps(manager, ensure_ascii=False, indent=2), encoding="utf-8")
+                self._group_names_path.parent.mkdir(parents=True, exist_ok=True)
+                self._group_names_path.write_text(
+                    json.dumps({x["id"]: x["name"] for x in clean if x["name"]}, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
                 quiet = [str(x) for x in manager.get("quiet_hours", ["00:00", "00:00"])]
                 quiet = (quiet + ["00:00", "00:00"])[:2]
                 rules = str(manager.get("rules_text", ""))
