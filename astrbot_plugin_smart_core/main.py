@@ -222,8 +222,12 @@ class Main(star.Star):
         group_id = str(payload.get("id", "")).strip() if isinstance(payload, dict) else ""
         if not group_id:
             return json_response({"ok": False, "error": "missing group id"})
-        current = [x for x in self._stored_groups() if x["id"] != group_id]
-        return json_response({"ok": True, "groups": self._persist_groups(current)})
+        try:
+            current = [x for x in self._stored_groups() if x["id"] != group_id]
+            return json_response({"ok": True, "groups": self._persist_groups(current)})
+        except (OSError, json.JSONDecodeError, sqlite3.Error) as exc:
+            logger.warning("Smart Core remove group failed: %s", type(exc).__name__)
+            return json_response({"ok": False, "error": "删除群失败，请检查群配置文件和数据库"})
 
     async def update_group(self):
         payload = await request.json(default={})
