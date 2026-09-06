@@ -196,6 +196,27 @@ class UiaSender(BaseSender):
         if focused is None or focused.GetRuntimeId() != control.GetRuntimeId():
             raise RuntimeError("微信输入焦点不在已核验控件，已停止输入")
 
+    @staticmethod
+    def wait_until_user_idle(idle_seconds: float = 5.0, timeout: float = 90.0) -> bool:
+        """Wait for a quiet desktop interval before retrying foreground UI work."""
+        import ctypes
+
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        started = time.monotonic()
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        while time.monotonic() - started < timeout:
+            info = LASTINPUTINFO()
+            info.cbSize = ctypes.sizeof(info)
+            if user32.GetLastInputInfo(ctypes.byref(info)):
+                elapsed_ms = (kernel32.GetTickCount() - info.dwTime) & 0xFFFFFFFF
+                if elapsed_ms >= int(idle_seconds * 1000):
+                    return True
+            time.sleep(0.5)
+        return False
+
     def _named_control(self, automation_id):
         roots = [self._window]
         # WeChat 4.x may render the active chat in a separate top-level window.

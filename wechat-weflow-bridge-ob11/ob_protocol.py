@@ -123,7 +123,7 @@ async def _handle_ob_api(data: dict):
                         }
                         bridge._sent_recently[text] = now
                     sent = False
-                    for attempt in range(2):
+                    for attempt in range(4):
                         send_started = time.time()
                         try:
                             sent = await asyncio.to_thread(state.sender_instance.send_text, contact, text)
@@ -136,9 +136,21 @@ async def _handle_ob_api(data: dict):
                         if sent:
                             break
                         retryable = bool(getattr(state.sender_instance, "last_failure_retryable", False))
-                        if attempt == 0 and retryable:
-                            log.warning("[OB11] 发送在输入前被打断，3 秒后安全重试: %s", contact)
-                            await asyncio.sleep(3)
+                        if attempt < 3 and retryable:
+                            log.warning(
+                                "[OB11] 发送在输入前被打断，等待键鼠空闲后重试 (%d/3): %s",
+                                attempt + 1,
+                                contact,
+                            )
+                            idle = await asyncio.to_thread(
+                                state.sender_instance.wait_until_user_idle,
+                                5.0,
+                                90.0,
+                            )
+                            if not idle:
+                                delivery_error = f"等待桌面空闲超时: {contact}"
+                                log.error("[OB11] 等待桌面空闲超时，停止重试: %s", contact)
+                                break
                             continue
                         break
                     if sent:
