@@ -167,12 +167,17 @@ class Main(star.Star):
             for value in data["model_roles"].values():
                 provider_ids.extend(str(value).split(","))
             manager = getattr(self.context, "provider_manager", None)
-            for attr in ("providers", "provider_instances"):
+            for attr in ("providers", "provider_instances", "provider_insts", "inst_map", "provider_sources_config", "providers_config"):
                 values = getattr(manager, attr, None) if manager is not None else None
                 if isinstance(values, dict):
                     provider_ids.extend(str(key) for key in values)
+                    provider_ids.extend(str(getattr(item, "provider_id", getattr(item, "id", ""))) for item in values.values())
                 elif isinstance(values, (list, tuple, set)):
-                    provider_ids.extend(str(getattr(item, "provider_id", getattr(item, "id", ""))) for item in values)
+                    for item in values:
+                        if isinstance(item, dict):
+                            provider_ids.extend(str(item.get("id", "")) for _ in [0])
+                        else:
+                            provider_ids.append(str(getattr(item, "provider_id", getattr(item, "id", item))))
             data["providers"] = sorted({item.strip() for item in provider_ids if item.strip()})
         except (OSError, json.JSONDecodeError):
             data["model_roles"] = {}
