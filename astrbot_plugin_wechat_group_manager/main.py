@@ -237,7 +237,7 @@ class Main(star.Star):
         if not callable(call_action):
             raise RuntimeError("当前平台没有可用的 OneBot API")
         result = await call_action(
-            "send_group_msg",
+            "send_group_msg_verified",
             group_id=int(target),
             message=[{"type": "text", "data": {"text": content}}],
         )

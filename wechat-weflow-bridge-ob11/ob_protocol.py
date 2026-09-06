@@ -55,30 +55,43 @@ async def _handle_ob_api(data: dict):
     echo = data.get("echo", "")
     log.info(f"[OB11] API: {action} echo={echo}")
 
-    # 先回响应（必须在处理消息前回，否则 AstrBot 超时）
-    resp_sent = False
-    resp_data = {"status": "ok", "retcode": 0, "data": {}}
-    if echo:
-        resp_data["echo"] = echo
-    # 如果 WS 暂时断连，等一会重试
-    for retry in range(10):
-        try:
-            if state._ob_ws:
-                await state._ob_ws.send(json.dumps(resp_data, ensure_ascii=False))
-                resp_sent = True
-                log.info(f"[OB11] 已回响应: {action}")
-                break
-            if retry < 9:
-                await asyncio.sleep(0.5)
-        except Exception as e:
-            log.warning(f"[OB11] 回响应失败 (重试 {retry}/10): {e}")
-            if retry < 9:
-                await asyncio.sleep(0.5)
-    if not resp_sent:
-        log.warning(f"[OB11] 无法回响应（WS 未连接），消息仍尝试本地处理: {action}")
+    verified_send = action == "send_group_msg_verified"
 
-    if action in ("send_msg", "send_private_msg", "send_group_msg"):
-        is_group = action == "send_group_msg" or (
+    async def respond(status="ok", retcode=0, response_data=None):
+        resp_data = {
+            "status": status,
+            "retcode": retcode,
+            "data": response_data or {},
+        }
+        if echo:
+            resp_data["echo"] = echo
+        # If WS is reconnecting, briefly wait before giving up on the response.
+        resp_sent = False
+        for retry in range(10):
+            try:
+                if state._ob_ws:
+                    await state._ob_ws.send(json.dumps(resp_data, ensure_ascii=False))
+                    resp_sent = True
+                    log.info(f"[OB11] 已回响应: {action} retcode={retcode}")
+                    break
+                if retry < 9:
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                log.warning(f"[OB11] 回响应失败 (重试 {retry}/10): {e}")
+                if retry < 9:
+                    await asyncio.sleep(0.5)
+        if not resp_sent:
+            log.warning(f"[OB11] 无法回响应（WS 未连接）: {action}")
+
+    # Normal OneBot sends keep their existing early acknowledgement. The
+    # verified action is used by announcements and waits for WeChat readback.
+    if not verified_send:
+        await respond()
+
+    if action in ("send_msg", "send_private_msg", "send_group_msg", "send_group_msg_verified"):
+        delivery_ok = True
+        delivery_error = ""
+        is_group = action in ("send_group_msg", "send_group_msg_verified") or (
             action == "send_msg" and (
                 params.get("message_type") == "group" or "group_id" in params
             )
@@ -110,15 +123,23 @@ async def _handle_ob_api(data: dict):
                         }
                         bridge._sent_recently[text] = now
                     send_started = time.time()
-                    sent = await asyncio.to_thread(state.sender_instance.send_text, contact, text)
-                    if sent:
-                        sent = await asyncio.to_thread(_verify_text_delivery, contact, text, send_started)
+                    try:
+                        sent = await asyncio.to_thread(state.sender_instance.send_text, contact, text)
+                        if sent:
+                            sent = await asyncio.to_thread(_verify_text_delivery, contact, text, send_started)
+                    except Exception as exc:
+                        sent = False
+                        delivery_error = f"微信文字发送异常: {type(exc).__name__}"
+                        log.error("[OB11] 文字发送异常: %s (%s)", contact, type(exc).__name__)
                     if sent:
                         log.info(f"[OB11] 微信回读确认文字已发送: {contact}")
                     else:
                         if bridge:
                             bridge._sent_recently.pop(text, None)
                         log.error(f"[OB11] 文字发送失败: {contact}")
+                        delivery_ok = False
+                        if not delivery_error:
+                            delivery_error = f"微信文字送达确认失败: {contact}"
 
             elif seg_type == "image":
                 file_val = seg_data.get("file", "")
@@ -170,10 +191,14 @@ async def _handle_ob_api(data: dict):
 
             # 其他类型（record, video 等）忽略
 
+        if verified_send:
+            if delivery_ok:
+                await respond(response_data={"delivery": "verified"})
+            else:
+                await respond("failed", 1200, {"delivery": "failed", "error": delivery_error})
+
     else:
         log.debug(f"[OB11] 未处理 API: {action}")
-
-    # 注意：API 响应已在函数开头统一发送，此处不再重复
 
 
 def _extract_text(message: list) -> str:

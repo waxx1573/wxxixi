@@ -99,6 +99,53 @@ class TextBridgeTests(unittest.TestCase):
         state.sender_instance.send_text.assert_called_once_with('TestGroup', 'hello')
         self.assertIsNone(self.event())
 
+    def test_verified_group_send_responds_after_delivery_readback(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state._ob_id_to_contact[456] = 'TestGroup'
+        state.bridge_instance = self.bridge
+
+        def send_text(contact, text):
+            state._ob_ws.send.assert_not_awaited()
+            return True
+
+        state.sender_instance = Mock()
+        state.sender_instance.send_text.side_effect = send_text
+        with patch.object(ob_protocol, '_verify_text_delivery', return_value=True):
+            asyncio.run(ob_protocol._handle_ob_api(dict(
+                action='send_group_msg_verified', echo='verified',
+                params={'group_id': '456', 'message': [{'type': 'text', 'data': {'text': 'notice'}}]},
+            )))
+        response = __import__('json').loads(state._ob_ws.send.await_args.args[0])
+        self.assertEqual(response['retcode'], 0)
+        self.assertEqual(response['data'], {'delivery': 'verified'})
+
+    def test_verified_group_send_reports_delivery_failure(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state._ob_id_to_contact[456] = 'TestGroup'
+        state.sender_instance = Mock()
+        state.sender_instance.send_text.return_value = False
+        asyncio.run(ob_protocol._handle_ob_api(dict(
+            action='send_group_msg_verified', echo='failed',
+            params={'group_id': '456', 'message': [{'type': 'text', 'data': {'text': 'notice'}}]},
+        )))
+        response = __import__('json').loads(state._ob_ws.send.await_args.args[0])
+        self.assertEqual(response['status'], 'failed')
+        self.assertEqual(response['retcode'], 1200)
+        self.assertEqual(response['data']['delivery'], 'failed')
+
+    def test_verified_group_send_reports_sender_exception(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state._ob_id_to_contact[456] = 'TestGroup'
+        state.sender_instance = Mock()
+        state.sender_instance.send_text.side_effect = RuntimeError('UI unavailable')
+        asyncio.run(ob_protocol._handle_ob_api(dict(
+            action='send_group_msg_verified', echo='failed',
+            params={'group_id': '456', 'message': [{'type': 'text', 'data': {'text': 'notice'}}]},
+        )))
+        response = __import__('json').loads(state._ob_ws.send.await_args.args[0])
+        self.assertEqual(response['retcode'], 1200)
+        self.assertIn('RuntimeError', response['data']['error'])
+
     def test_failed_contact_switch_never_pastes_or_caches(self):
         sender = UiaSender.__new__(UiaSender)
         sender._lock = __import__('threading').Lock()
@@ -176,6 +223,20 @@ class TextBridgeTests(unittest.TestCase):
         target.Click.assert_called_once()
         other.GetSelectionItemPattern.assert_not_called()
         self.assertNotIn(call('{Enter}'), sender._auto.SendKeys.call_args_list)
+
+    def test_contact_selection_accepts_latest_message_suffix_in_chat_title(self):
+        sender = self.contact_sender()
+        target = Mock(AutomationId='session_item_TestGroup')
+        sender._window.ListControl.return_value.GetChildren.return_value = [target]
+        title = Mock(Name='TestGroup latest message')
+        editor = Mock()
+        editor.SetFocus.return_value = True
+        editor.GetRuntimeId.return_value = [9]
+        sender._auto.GetFocusedControl.side_effect = [editor]
+        sender._window.Control.side_effect = [title, editor]
+        with patch('uia_sender.time.sleep'):
+            self.assertTrue(sender._switch_contact('TestGroup'))
+        target.Click.assert_called_once()
 
     def test_missing_or_duplicate_session_never_types(self):
         for items in ([], [Mock(AutomationId='session_item_TestGroup')] * 2):
