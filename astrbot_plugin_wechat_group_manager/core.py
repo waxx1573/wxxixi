@@ -32,6 +32,7 @@ class Store:
         CREATE TABLE IF NOT EXISTS message_window(group_id TEXT NOT NULL,sender_id TEXT NOT NULL,content_hash TEXT NOT NULL,seen_at REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS message_window_idx ON message_window(group_id,sender_id,seen_at);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,group_id TEXT NOT NULL,actor_id TEXT NOT NULL,action TEXT NOT NULL,result TEXT NOT NULL,detail TEXT NOT NULL,created_at REAL NOT NULL);
+        CREATE TABLE IF NOT EXISTS announcements(id INTEGER PRIMARY KEY AUTOINCREMENT,target_group_id TEXT NOT NULL,actor_id TEXT NOT NULL,content_hash TEXT NOT NULL,result TEXT NOT NULL,detail TEXT NOT NULL,created_at REAL NOT NULL);
         """)
         self.db.commit()
 
@@ -104,6 +105,22 @@ class Store:
 
     def audit(self, group_id: str, actor: str, action: str, result: str, detail: str = "") -> None:
         self.db.execute("INSERT INTO audit(group_id,actor_id,action,result,detail,created_at) VALUES(?,?,?,?,?,?)", (group_id, actor, action, result, detail[:1000], time.time()))
+        self.db.commit()
+
+    def announcement_recent(self, actor: str, target_group: str, cooldown_seconds: int) -> bool:
+        cutoff = time.time() - max(0, cooldown_seconds)
+        row = self.db.execute(
+            "SELECT 1 FROM announcements WHERE actor_id=? AND target_group_id=? AND result='accepted' AND created_at>=? LIMIT 1",
+            (actor, target_group, cutoff),
+        ).fetchone()
+        return row is not None
+
+    def record_announcement(self, actor: str, target_group: str, content: str, result: str, detail: str = "") -> None:
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        self.db.execute(
+            "INSERT INTO announcements(target_group_id,actor_id,content_hash,result,detail,created_at) VALUES(?,?,?,?,?,?)",
+            (target_group, actor, digest, result, detail[:1000], time.time()),
+        )
         self.db.commit()
 
 

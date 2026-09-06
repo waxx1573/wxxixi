@@ -12,6 +12,7 @@ from astrbot.api.platform import MessageType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core import Engine, RUN_LEVELS, Store
+from .announcement import parse_announcement
 
 
 class Main(star.Star):
@@ -194,12 +195,55 @@ class Main(star.Star):
             elif command in {"确认", "忽略", "误报"}:
                 status = {"确认": "confirmed", "忽略": "ignored", "误报": "false_positive"}[command]
                 yield event.plain_result(f"事件更新={self.store.resolve(group, int(parts[2].lstrip('#')), status)}")
+            elif command == "公告":
+                if not bool(self.config.get("announcement_enabled", True)):
+                    raise ValueError("公告功能当前已停用")
+                targets, content = parse_announcement(
+                    text,
+                    group,
+                    self._set("allowed_group_ids"),
+                    max_length=int(self.config.get("announcement_max_length", 1000)),
+                )
+                cooldown = int(self.config.get("announcement_cooldown_seconds", 30))
+                results: list[str] = []
+                for target in targets:
+                    if self.store.announcement_recent(actor, target, cooldown):
+                        self.store.audit(group, actor, "announcement", "denied", f"target={target}; cooldown")
+                        results.append(f"{target}: 冷却中")
+                        continue
+                    try:
+                        result = await self._send_announcement(event, target, content)
+                        detail = json.dumps(result, ensure_ascii=False, default=str)[:900]
+                        self.store.record_announcement(actor, target, content, "accepted", detail)
+                        self.store.audit(group, actor, "announcement", "accepted", f"target={target}; {detail}")
+                        results.append(f"{target}: 已提交")
+                    except Exception as exc:
+                        self.store.record_announcement(actor, target, content, "failed", str(exc))
+                        self.store.audit(group, actor, "announcement", "failed", f"target={target}; {exc}")
+                        results.append(f"{target}: 失败({exc})")
+                yield event.plain_result("公告结果：" + "；".join(results))
             else:
-                yield event.plain_result("命令：/wx 状态|暂停|开启|级别 capture|shadow|assisted|active|模式 mention|keyword|静默 HH:MM HH:MM|群规|设置群规|关键词 添加/删除|待处理|确认/忽略/误报")
+                yield event.plain_result("命令：/wx 状态|公告 <稳定群ID|当前|全部> <内容>|暂停|开启|级别 capture|shadow|assisted|active|模式 mention|keyword|静默 HH:MM HH:MM|群规|设置群规|关键词 添加/删除|待处理|确认/忽略/误报")
             self.store.audit(group, actor, command, "success", text)
         except (ValueError, IndexError) as exc:
             self.store.audit(group, actor, command, "failed", str(exc))
             yield event.plain_result(f"命令失败：{exc}")
+
+    async def _send_announcement(self, event: AstrMessageEvent, target: str, content: str):
+        """Use AstrBot's native OneBot action so the bridge owns transport."""
+        bot = getattr(event, "bot", None)
+        api = getattr(bot, "api", None)
+        call_action = getattr(api, "call_action", None)
+        if not callable(call_action):
+            raise RuntimeError("当前平台没有可用的 OneBot API")
+        result = await call_action(
+            "send_group_msg",
+            group_id=int(target),
+            message=[{"type": "text", "data": {"text": content}}],
+        )
+        if isinstance(result, dict) and result.get("retcode", 0) not in (0, None):
+            raise RuntimeError(f"OneBot retcode={result.get('retcode')}")
+        return result
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
     async def on_group_message(self, event: AstrMessageEvent):

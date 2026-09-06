@@ -13,5 +13,8 @@
   "flood_window_seconds": {"description": "刷屏检测窗口秒数", "type": "int", "default": 10},
   "blocked_words": {"description": "进入人工处理的禁词", "type": "list", "items": {"type": "string"}, "default": []},
   "ad_domains": {"description": "进入人工处理的广告域名", "type": "list", "items": {"type": "string"}, "default": []},
-  "rules_text": {"description": "默认群规", "type": "string", "default": "请友善交流，不刷屏，不发布未经确认的广告和风险链接。"}
+  "rules_text": {"description": "默认群规", "type": "string", "default": "请友善交流，不刷屏，不发布未经确认的广告和风险链接。"},
+  "announcement_enabled": {"description": "允许管理员发送指定群公告", "type": "bool", "default": true},
+  "announcement_max_length": {"description": "单条公告最大字符数", "type": "int", "default": 1000},
+  "announcement_cooldown_seconds": {"description": "同一管理员对同一目标群的公告冷却秒数", "type": "int", "default": 30}
 }
