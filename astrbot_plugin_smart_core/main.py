@@ -167,18 +167,24 @@ class Main(star.Star):
             for value in data["model_roles"].values():
                 provider_ids.extend(str(value).split(","))
             manager = getattr(self.context, "provider_manager", None)
-            for attr in ("providers", "provider_instances", "provider_insts", "inst_map"):
-                values = getattr(manager, attr, None) if manager is not None else None
-                if isinstance(values, dict):
-                    provider_ids.extend(str(key) for key in values)
-                    provider_ids.extend(str(getattr(item, "provider_id", getattr(item, "id", ""))) for item in values.values())
-                elif isinstance(values, (list, tuple, set)):
-                    for item in values:
-                        if isinstance(item, dict):
-                            provider_ids.extend(str(item.get("id", "")) for _ in [0])
-                        else:
-                            provider_ids.append(str(getattr(item, "provider_id", getattr(item, "id", item))))
-            data["providers"] = sorted({item.strip() for item in provider_ids if item.strip()})
+            if manager is not None:
+                inst_map = getattr(manager, "inst_map", {})
+                if isinstance(inst_map, dict):
+                    provider_ids.extend(str(key) for key in inst_map)
+                for attr in ("provider_insts", "providers", "provider_instances"):
+                    values = getattr(manager, attr, None)
+                    if isinstance(values, dict):
+                        provider_ids.extend(str(key) for key in values)
+                    elif isinstance(values, (list, tuple, set)):
+                        for item in values:
+                            config = getattr(item, "provider_config", None)
+                            if isinstance(config, dict):
+                                provider_ids.append(str(config.get("id", "")))
+                            else:
+                                item_id = getattr(item, "id", "")
+                                if isinstance(item_id, str):
+                                    provider_ids.append(item_id)
+            data["providers"] = sorted({item.strip() for item in provider_ids if "/" in item and "<" not in item})
         except (OSError, json.JSONDecodeError):
             data["model_roles"] = {}
         return json_response(data)
