@@ -224,13 +224,15 @@ class Main(star.Star):
                 logger.warning("Smart Core model role update failed: %s", type(exc).__name__)
         groups = values.get("groups")
         if isinstance(groups, list):
+            removed_ids = {str(x).strip() for x in (values.get("removed_group_ids") or []) if str(x).strip()}
+            existing_items = [dict(x) for x in data.get("groups", []) if isinstance(x, dict) and x.get("id")]
             clean = []
             seen = set()
-            for item in groups:
+            for item in existing_items + groups:
                 if not isinstance(item, dict):
                     continue
                 group_id = str(item.get("id", "")).strip()
-                if not group_id or group_id in seen:
+                if not group_id or group_id in seen or group_id in removed_ids:
                     continue
                 seen.add(group_id)
                 reply_mode = str(item.get("reply_mode", "mention"))
