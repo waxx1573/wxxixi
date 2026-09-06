@@ -51,7 +51,7 @@ class Main(star.Star):
         self._config_path = Path("/AstrBot/data/astrbot_plugin_smart_core.json")
         self._astrbot_config_path = Path("/AstrBot/data/cmd_config.json")
         self._group_config_path = Path("/AstrBot/data/config/astrbot_plugin_wechat_group_manager_config.json")
-        self._group_names_path = Path("/AstrBot/data/plugin_data/astrbot_plugin_smart_core/group_names.json")
+        self._group_names_path = Path(__file__).parent / "group_names.json"
         self._group_db_path = Path("/AstrBot/data/plugin_data/astrbot_plugin_wechat_group_manager/group_manager.sqlite3")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.get_config, ["GET"], "Get Smart Core config")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.save_config, ["POST"], "Save Smart Core config")
