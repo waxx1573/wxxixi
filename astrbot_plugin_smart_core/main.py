@@ -17,6 +17,12 @@ from astrbot.core.provider.sources.openai_source import ProviderOpenAIOfficial
 
 
 _context = None
+DEFAULT_GROUP_NAMES = {
+    "5550672362880625580": "记录",
+    "195576620169779950": "明宇三剑客",
+    "834337394775417696": "凡人鲜货炭烤 · 烟火①局",
+    "8106142036419670726": "凡人鲜货炭烤 · 烟火②局",
+}
 
 
 @register_provider_adapter("smart_openai_fallback", "Smart Core OpenAI provider with fallback")
@@ -111,7 +117,9 @@ class Main(star.Star):
             try:
                 saved_names = json.loads(self._group_names_path.read_text(encoding="utf-8-sig"))
                 if isinstance(saved_names, dict):
-                    detected = [{"id": str(group_id), "name": str(name)} for group_id, name in saved_names.items() if str(group_id).strip()]
+                    merged_names = dict(DEFAULT_GROUP_NAMES)
+                    merged_names.update({str(k): str(v) for k, v in saved_names.items() if str(k).strip()})
+                    detected = [{"id": str(group_id), "name": str(name)} for group_id, name in merged_names.items() if str(group_id).strip()]
             except (OSError, json.JSONDecodeError):
                 pass
         return json_response({"ok": True, "groups": detected})
@@ -128,11 +136,11 @@ class Main(star.Star):
             allowed_ids = [str(x) for x in manager.get("allowed_group_ids", []) if str(x).strip()]
         except (OSError, json.JSONDecodeError):
             pass
-        names = {}
+        names = dict(DEFAULT_GROUP_NAMES)
         try:
             saved_names = json.loads(self._group_names_path.read_text(encoding="utf-8-sig"))
             if isinstance(saved_names, dict):
-                names = {str(k): str(v).strip() for k, v in saved_names.items() if str(v).strip()}
+                names.update({str(k): str(v).strip() for k, v in saved_names.items() if str(v).strip()})
         except (OSError, json.JSONDecodeError):
             pass
         try:
@@ -238,10 +246,15 @@ class Main(star.Star):
                 manager["smart_groups"] = clean
                 self._group_config_path.write_text(json.dumps(manager, ensure_ascii=False, indent=2), encoding="utf-8")
                 self._group_names_path.parent.mkdir(parents=True, exist_ok=True)
-                self._group_names_path.write_text(
-                    json.dumps({x["id"]: x["name"] for x in clean if x["name"]}, ensure_ascii=False, indent=2),
-                    encoding="utf-8",
-                )
+                existing_names = dict(DEFAULT_GROUP_NAMES)
+                try:
+                    saved_names = json.loads(self._group_names_path.read_text(encoding="utf-8-sig"))
+                    if isinstance(saved_names, dict):
+                        existing_names.update({str(k): str(v) for k, v in saved_names.items() if str(v).strip()})
+                except (OSError, json.JSONDecodeError):
+                    pass
+                existing_names.update({x["id"]: x["name"] for x in clean if x["name"]})
+                self._group_names_path.write_text(json.dumps(existing_names, ensure_ascii=False, indent=2), encoding="utf-8")
                 quiet = [str(x) for x in manager.get("quiet_hours", ["00:00", "00:00"])]
                 quiet = (quiet + ["00:00", "00:00"])[:2]
                 rules = str(manager.get("rules_text", ""))
