@@ -280,9 +280,13 @@ class UiaSender(BaseSender):
                 time.sleep(0.2)
                 title = self._named_control(title_id)
                 editor = self._named_control("chat_input_field")
-                if title is not None and title.Name == contact and editor is not None:
+                title_name = str(getattr(title, "Name", "") or "") if title is not None else ""
+                title_matches = title_name == contact or title_name.startswith(contact + " ") or title_name.startswith(contact + "\n")
+                if title is not None and title_matches and editor is not None:
                     break
-            if title is None or title.Name != contact or editor is None:
+            title_name = str(getattr(title, "Name", "") or "") if title is not None else ""
+            title_matches = title_name == contact or title_name.startswith(contact + " ") or title_name.startswith(contact + "\n")
+            if title is None or not title_matches or editor is None:
                 focused = self._auto.GetFocusedControl()
                 log.error(
                     "目标会话或聊天输入框校验失败: %s (title=%r editor=%s focused=%r/%r)",
