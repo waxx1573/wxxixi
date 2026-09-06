@@ -130,7 +130,7 @@
         Object.entries(roleIds).forEach(([key,id])=>payload.model_roles[key]=document.getElementById(id).value.trim());
         const result=await window.AstrBotPluginPage.apiPost('page/config',payload);
         if(!result||!result.ok)throw new Error(result?.error||'保存失败');
-        groups=result.groups||payload.groups;
+        groups=Array.isArray(result.groups)?result.groups:payload.groups;
         removedGroupIds=[];
         renderGroups();
         renderGroupChoices();
