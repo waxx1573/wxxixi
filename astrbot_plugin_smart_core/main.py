@@ -91,7 +91,7 @@ class Main(star.Star):
     async def get_config(self):
         data = self._settings()
         try:
-            manager = json.loads(self._group_config_path.read_text(encoding="utf-8"))
+            manager = json.loads(self._group_config_path.read_text(encoding="utf-8-sig"))
             data["groups"] = manager.get("smart_groups", [])
             if not data["groups"]:
                 data["groups"] = [{"id": x, "name": "", "enabled": True, "ppbot": True, "reply_mode": "mention", "moderation": "standard"} for x in manager.get("allowed_group_ids", [])]
@@ -164,7 +164,7 @@ class Main(star.Star):
                     moderation = "standard"
                 clean.append({"id": group_id, "name": str(item.get("name", "")).strip()[:100], "enabled": bool(item.get("enabled", True)), "ppbot": bool(item.get("ppbot", True)), "reply_mode": reply_mode, "moderation": moderation})
             try:
-                manager = json.loads(self._group_config_path.read_text(encoding="utf-8"))
+                manager = json.loads(self._group_config_path.read_text(encoding="utf-8-sig"))
                 manager["allowed_group_ids"] = [x["id"] for x in clean if x["enabled"]]
                 manager["smart_groups"] = clean
                 self._group_config_path.write_text(json.dumps(manager, ensure_ascii=False, indent=2), encoding="utf-8")
