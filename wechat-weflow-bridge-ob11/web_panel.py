@@ -13,6 +13,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import state
 import config
+import requests
 
 log = logging.getLogger("ob11-bridge")
 
@@ -392,6 +393,36 @@ class WebHandler(BaseHTTPRequestHandler):
                 "group_reply_mode": state.group_reply_mode,
                 "log": "\n".join(log_lines),
             })
+        elif self.path == "/api/contacts":
+            try:
+                response = requests.get(
+                    f"{config.WE_FLOW_BASE_URL}/api/v1/contacts",
+                    params={"access_token": config.ACCESS_TOKEN}, timeout=8,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                rows = payload.get("data", payload) if isinstance(payload, dict) else payload
+                if isinstance(rows, dict):
+                    rows = rows.get("contacts", rows.get("items", []))
+                groups = []
+                if isinstance(rows, list):
+                    for item in rows:
+                        if not isinstance(item, dict):
+                            continue
+                        wxid = str(item.get("username") or item.get("wxid") or item.get("id") or item.get("userName") or "").strip()
+                        name = str(item.get("remark") or item.get("nickname") or item.get("displayName") or item.get("name") or wxid).strip()
+                        kind = str(item.get("type") or item.get("contactType") or item.get("scene") or "").lower()
+                        if wxid and ("@chatroom" in wxid or "group" in kind or "chatroom" in kind):
+                            groups.append({"id": str(state._wxid_to_int(wxid)), "name": name, "wxid": wxid})
+                cached = {str(state._wxid_to_int(session)): name for name, session in state._contact_to_session.items() if session and "@chatroom" in session}
+                by_id = {item["id"]: item for item in groups}
+                for group_id, name in cached.items():
+                    by_id.setdefault(group_id, {"id": group_id, "name": name, "wxid": ""})
+                self.send_json({"ok": True, "groups": list(by_id.values())})
+            except Exception as exc:
+                log.warning("[Web] 获取群列表失败: %s", type(exc).__name__)
+                cached = [{"id": str(state._wxid_to_int(session)), "name": name, "wxid": session} for name, session in state._contact_to_session.items() if session and "@chatroom" in session]
+                self.send_json({"ok": bool(cached), "groups": cached, "error": "contacts unavailable"}, 200)
         elif self.path == "/api/config":
             try:
                 with open(config.CONFIG_FILE, "r", encoding="utf-8") as f:

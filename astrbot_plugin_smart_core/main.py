@@ -3,6 +3,8 @@ import json
 import sqlite3
 import time
 import copy
+import asyncio
+import urllib.request
 from collections import OrderedDict
 from pathlib import Path
 
@@ -53,8 +55,10 @@ class Main(star.Star):
         self._group_config_path = Path("/AstrBot/data/config/astrbot_plugin_wechat_group_manager_config.json")
         self._group_names_path = Path(__file__).parent / "group_names.json"
         self._group_db_path = Path("/AstrBot/data/plugin_data/astrbot_plugin_wechat_group_manager/group_manager.sqlite3")
+        self._bridge_config_path = Path("/AstrBot/data/config/astrbot_plugin_wechat_bridge_config.json")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.get_config, ["GET"], "Get Smart Core config")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.save_config, ["POST"], "Save Smart Core config")
+        context.register_web_api("/astrbot_plugin_smart_core/page/groups", self.get_groups, ["GET"], "Get available WeChat groups")
 
     async def initialize(self):
         manager = self.context.persona_manager
@@ -89,6 +93,29 @@ class Main(star.Star):
             pass
         return defaults
 
+    async def get_groups(self):
+        """Return detected groups from the running bridge, with saved groups as fallback."""
+        detected = []
+        try:
+            bridge_cfg = json.loads(self._bridge_config_path.read_text(encoding="utf-8-sig"))
+            base_url = str(bridge_cfg.get("bridge_url", "http://127.0.0.1:8766")).rstrip("/")
+            def fetch():
+                with urllib.request.urlopen(base_url + "/api/contacts", timeout=5) as response:
+                    return json.loads(response.read().decode("utf-8"))
+            result = await asyncio.to_thread(fetch)
+            if isinstance(result, dict) and isinstance(result.get("groups"), list):
+                detected = [x for x in result["groups"] if isinstance(x, dict) and x.get("id")]
+        except Exception as exc:
+            logger.debug("Smart Core group detection unavailable: %s", type(exc).__name__)
+        if not detected:
+            try:
+                saved_names = json.loads(self._group_names_path.read_text(encoding="utf-8-sig"))
+                if isinstance(saved_names, dict):
+                    detected = [{"id": str(group_id), "name": str(name)} for group_id, name in saved_names.items() if str(group_id).strip()]
+            except (OSError, json.JSONDecodeError):
+                pass
+        return json_response({"ok": True, "groups": detected})
+
     async def get_config(self):
         data = self._settings()
         groups = []
@@ -112,7 +139,11 @@ class Main(star.Star):
             with sqlite3.connect(self._group_db_path) as db:
                 states = {row[0]: {"run_level": row[1], "reply_mode": row[2]} for row in db.execute("SELECT group_id, run_level, reply_mode FROM groups")}
             by_id = {str(group["id"]): group for group in groups}
-            for group_id in list(states) + allowed_ids:
+            visible_ids = set(allowed_ids) | set(by_id)
+            for group_id in list(states):
+                if str(group_id) not in visible_ids:
+                    continue
+            for group_id in list(visible_ids):
                 group_id = str(group_id)
                 group = by_id.setdefault(group_id, {"id": group_id, "name": "", "enabled": group_id in allowed_ids, "ppbot": True, "reply_mode": "mention", "moderation": "standard"})
                 group["name"] = str(group.get("name") or names.get(group_id, ""))
@@ -132,6 +163,17 @@ class Main(star.Star):
                 "vision": ps.get("default_image_caption_provider_id", ""),
                 "compress": ps.get("llm_compress_provider_id", ""),
             }
+            provider_ids = []
+            for value in data["model_roles"].values():
+                provider_ids.extend(str(value).split(","))
+            manager = getattr(self.context, "provider_manager", None)
+            for attr in ("providers", "provider_instances"):
+                values = getattr(manager, attr, None) if manager is not None else None
+                if isinstance(values, dict):
+                    provider_ids.extend(str(key) for key in values)
+                elif isinstance(values, (list, tuple, set)):
+                    provider_ids.extend(str(getattr(item, "provider_id", getattr(item, "id", ""))) for item in values)
+            data["providers"] = sorted({item.strip() for item in provider_ids if item.strip()})
         except (OSError, json.JSONDecodeError):
             data["model_roles"] = {}
         return json_response(data)
@@ -193,6 +235,10 @@ class Main(star.Star):
                 quiet = (quiet + ["00:00", "00:00"])[:2]
                 rules = str(manager.get("rules_text", ""))
                 with sqlite3.connect(self._group_db_path) as db:
+                    placeholders = ",".join("?" for _ in clean) or "?"
+                    keep_ids = [x["id"] for x in clean] or [""]
+                    for table in ("groups", "keywords", "events", "message_window", "audit", "announcements"):
+                        db.execute(f"DELETE FROM {table} WHERE group_id NOT IN ({placeholders})" if table not in {"announcements"} else f"DELETE FROM {table} WHERE target_group_id NOT IN ({placeholders})", keep_ids)
                     for group in clean:
                         run_level = "active" if group["enabled"] and group["ppbot"] else "shadow"
                         db.execute("""INSERT INTO groups(group_id,run_level,reply_mode,rules,quiet_start,quiet_end,updated_at)
