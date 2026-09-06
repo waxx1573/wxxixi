@@ -125,16 +125,19 @@
       saveButton.textContent='保存中…';
       showMessage('');
       try{
-        const payload={groups:collectGroups(),removed_group_ids:[...removedGroupIds],model_roles:{}};
+        const payload={model_roles:{}};
         configIds.forEach(key=>{const element=document.getElementById(key);payload[key]=element.type==='checkbox'?element.checked:element.type==='number'?Number(element.value):element.value;});
         Object.entries(roleIds).forEach(([key,id])=>payload.model_roles[key]=document.getElementById(id).value.trim());
         const result=await window.AstrBotPluginPage.apiPost('page/config',payload);
         if(!result||!result.ok)throw new Error(result?.error||'保存失败');
-        groups=Array.isArray(result.groups)?result.groups:payload.groups;
+        const rows=collectGroups();
+        for(const group of rows){const saved=await window.AstrBotPluginPage.apiPost('page/groups/update',{group});if(!saved||!saved.ok)throw new Error(saved?.error||'群策略保存失败');}
+        const latest=await window.AstrBotPluginPage.apiGet('page/config');
+        if(Array.isArray(latest?.groups))groups=latest.groups;
         removedGroupIds=[];
         renderGroups();
         renderGroupChoices();
-        showMessage('已保存并同步群管理状态');
+        showMessage('已保存配置');
       }finally{
         saveButton.disabled=!configLoaded;
         saveButton.textContent='保存 Smart 配置';
@@ -144,8 +147,8 @@
     document.querySelectorAll('.nav').forEach(nav=>nav.addEventListener('click',()=>{document.querySelectorAll('.nav').forEach(item=>item.classList.remove('active'));document.querySelectorAll('.panel').forEach(item=>item.classList.remove('active'));nav.classList.add('active');document.querySelector(`[data-panel="${nav.dataset.tab}"]`).classList.add('active');document.getElementById('title').textContent=nav.textContent;}));
     async function loadDetectedGroups(){try{const data=await window.AstrBotPluginPage.apiGet('page/groups');detectedGroups=Array.isArray(data?.groups)?data.groups:[];renderGroupChoices();document.getElementById('group_detect_hint').textContent=detectedGroups.length?`已检测到 ${detectedGroups.length} 个微信群，可以直接选择。`:'暂未检测到在线群，请检查桥接连接。';}catch(error){document.getElementById('group_detect_hint').textContent='桥接暂不可用，当前无法读取微信群。';renderGroupChoices();}}
     document.getElementById('refresh_groups').addEventListener('click',()=>loadDetectedGroups().then(()=>showMessage('群列表已刷新')).catch(error=>showMessage(error.message,true)));
-    document.getElementById('add_group').addEventListener('click',()=>{const select=document.getElementById('new_group_select');const selected=[...select.selectedOptions].map(option=>String(option.value)).filter(Boolean);const current=collectGroups();if(!selected.length)return showMessage('请先选择一个或多个微信群',true);const additions=selected.filter(id=>!current.some(group=>String(group.id)===id)).map(id=>{const found=detectedGroups.find(group=>String(group.id)===id)||{id,name:id};return {id:String(found.id),name:String(found.name||found.id),enabled:true,ppbot:true,reply_mode:'mention',moderation:'standard'};});if(!additions.length)return showMessage('所选群已经全部在管理列表中',true);groups=current.concat(additions);removedGroupIds=removedGroupIds.filter(id=>!additions.some(group=>String(group.id)===id));[...select.options].forEach(option=>option.selected=false);renderGroups();renderGroupChoices();showMessage(`已加入 ${additions.length} 个群，点击保存后生效`);});
-    document.getElementById('group_list').addEventListener('click',event=>{const button=event.target.closest('[data-remove]');if(!button)return;const row=button.closest('.group-item[data-index]');const index=Number(row?.dataset.index);if(!Number.isInteger(index))return;const current=collectGroups();if(index<0||index>=current.length)return showMessage('删除失败，请刷新列表后重试',true);const removed=current[index];if(removed?.id)removedGroupIds=[...new Set([...removedGroupIds,String(removed.id)])];current.splice(index,1);groups=current;renderGroups();renderGroupChoices();showMessage('已移除这个群，点击保存后生效');});
+    document.getElementById('add_group').addEventListener('click',async()=>{const select=document.getElementById('new_group_select');const selected=[...select.selectedOptions].map(option=>String(option.value)).filter(Boolean);if(!selected.length)return showMessage('请先选择一个或多个微信群',true);const additions=selected.map(id=>{const found=detectedGroups.find(group=>String(group.id)===id)||{id,name:id};return {id:String(found.id),name:String(found.name||found.id),enabled:true,ppbot:true,reply_mode:'mention',moderation:'standard'};});try{const result=await window.AstrBotPluginPage.apiPost('page/groups/add',{groups:additions});if(!result||!result.ok)throw new Error(result?.error||'添加群失败');groups=Array.isArray(result.groups)?result.groups:groups;[...select.options].forEach(option=>option.selected=false);renderGroups();renderGroupChoices();showMessage(`已保存 ${additions.length} 个群`);}catch(error){showMessage(error.message,true);}});
+    document.getElementById('group_list').addEventListener('click',async event=>{const button=event.target.closest('[data-remove]');if(!button)return;const row=button.closest('.group-item[data-index]');const index=Number(row?.dataset.index);const current=collectGroups();if(!Number.isInteger(index)||index<0||index>=current.length)return showMessage('删除失败，请刷新列表后重试',true);const groupId=String(current[index].id);try{const result=await window.AstrBotPluginPage.apiPost('page/groups/remove',{id:groupId});if(!result||!result.ok)throw new Error(result?.error||'删除失败');groups=Array.isArray(result.groups)?result.groups:current.filter(group=>String(group.id)!==groupId);renderGroups();renderGroupChoices();showMessage('已删除这个群');}catch(error){showMessage(error.message,true);}});
     document.getElementById('save').addEventListener('click',()=>save().catch(error=>showMessage(error.message,true)));load().catch(error=>showMessage(error.message,true));
   </script>
 </body>

@@ -65,6 +65,9 @@ class Main(star.Star):
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.get_config, ["GET"], "Get Smart Core config")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.save_config, ["POST"], "Save Smart Core config")
         context.register_web_api("/astrbot_plugin_smart_core/page/groups", self.get_groups, ["GET"], "Get available WeChat groups")
+        context.register_web_api("/astrbot_plugin_smart_core/page/groups/add", self.add_groups, ["POST"], "Add managed groups")
+        context.register_web_api("/astrbot_plugin_smart_core/page/groups/remove", self.remove_group, ["POST"], "Remove managed group")
+        context.register_web_api("/astrbot_plugin_smart_core/page/groups/update", self.update_group, ["POST"], "Update managed group")
 
     async def initialize(self):
         manager = self.context.persona_manager
@@ -123,6 +126,119 @@ class Main(star.Star):
             except (OSError, json.JSONDecodeError):
                 pass
         return json_response({"ok": True, "groups": detected})
+
+    def _stored_groups(self):
+        data = self._settings()
+        groups = [dict(x) for x in data.get("groups", []) if isinstance(x, dict) and x.get("id")]
+        try:
+            manager = json.loads(self._group_config_path.read_text(encoding="utf-8-sig"))
+            persisted = manager.get("smart_groups", []) if isinstance(manager, dict) else []
+            if not groups and isinstance(persisted, list):
+                groups = [dict(x) for x in persisted if isinstance(x, dict) and x.get("id")]
+        except (OSError, json.JSONDecodeError):
+            pass
+        result = []
+        seen = set()
+        for item in groups:
+            group_id = str(item.get("id", "")).strip()
+            if not group_id or group_id in seen:
+                continue
+            seen.add(group_id)
+            result.append({
+                "id": group_id,
+                "name": str(item.get("name", "")).strip()[:100],
+                "enabled": bool(item.get("enabled", True)),
+                "ppbot": bool(item.get("ppbot", True)),
+                "reply_mode": item.get("reply_mode") if item.get("reply_mode") in {"mention", "keyword"} else "mention",
+                "moderation": item.get("moderation") if item.get("moderation") in {"off", "standard", "strict"} else "standard",
+            })
+        return result
+
+    def _persist_groups(self, groups):
+        clean = []
+        seen = set()
+        for item in groups:
+            if not isinstance(item, dict):
+                continue
+            group_id = str(item.get("id", "")).strip()
+            if not group_id or group_id in seen:
+                continue
+            seen.add(group_id)
+            clean.append({
+                "id": group_id,
+                "name": str(item.get("name", "")).strip()[:100],
+                "enabled": bool(item.get("enabled", True)),
+                "ppbot": bool(item.get("ppbot", True)),
+                "reply_mode": item.get("reply_mode") if item.get("reply_mode") in {"mention", "keyword"} else "mention",
+                "moderation": item.get("moderation") if item.get("moderation") in {"off", "standard", "strict"} else "standard",
+            })
+        manager = json.loads(self._group_config_path.read_text(encoding="utf-8-sig"))
+        manager["allowed_group_ids"] = [x["id"] for x in clean if x["enabled"]]
+        manager["smart_groups"] = clean
+        self._group_config_path.write_text(json.dumps(manager, ensure_ascii=False, indent=2), encoding="utf-8")
+        names = dict(DEFAULT_GROUP_NAMES)
+        try:
+            saved = json.loads(self._group_names_path.read_text(encoding="utf-8-sig"))
+            if isinstance(saved, dict):
+                names.update({str(k): str(v) for k, v in saved.items() if str(v).strip()})
+        except (OSError, json.JSONDecodeError):
+            pass
+        names.update({x["id"]: x["name"] for x in clean if x["name"]})
+        self._group_names_path.parent.mkdir(parents=True, exist_ok=True)
+        self._group_names_path.write_text(json.dumps(names, ensure_ascii=False, indent=2), encoding="utf-8")
+        quiet = [str(x) for x in manager.get("quiet_hours", ["00:00", "00:00"])]
+        quiet = (quiet + ["00:00", "00:00"])[:2]
+        rules = str(manager.get("rules_text", ""))
+        with sqlite3.connect(self._group_db_path) as db:
+            keep_ids = [x["id"] for x in clean] or [""]
+            placeholders = ",".join("?" for _ in keep_ids)
+            for table in ("groups", "keywords", "events", "message_window", "audit", "announcements"):
+                column = "target_group_id" if table == "announcements" else "group_id"
+                db.execute(f"DELETE FROM {table} WHERE {column} NOT IN ({placeholders})", keep_ids)
+            for group in clean:
+                run_level = "active" if group["enabled"] and group["ppbot"] else "shadow"
+                db.execute("""INSERT INTO groups(group_id,run_level,reply_mode,rules,quiet_start,quiet_end,updated_at)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT(group_id) DO UPDATE SET
+                    run_level=excluded.run_level, reply_mode=excluded.reply_mode, updated_at=excluded.updated_at""",
+                    (group["id"], run_level, group["reply_mode"], rules, quiet[0], quiet[1], time.time()))
+        data = self._settings()
+        data["groups"] = clean
+        self._config_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        return clean
+
+    async def add_groups(self):
+        payload = await request.json(default={})
+        items = payload.get("groups", []) if isinstance(payload, dict) else []
+        current = self._stored_groups()
+        by_id = {x["id"]: x for x in current}
+        for item in items if isinstance(items, list) else []:
+            if isinstance(item, dict) and str(item.get("id", "")).strip():
+                group_id = str(item["id"]).strip()
+                by_id.setdefault(group_id, {"id": group_id, "name": str(item.get("name", group_id)), "enabled": True, "ppbot": True, "reply_mode": "mention", "moderation": "standard"})
+        return json_response({"ok": True, "groups": self._persist_groups(list(by_id.values()))})
+
+    async def remove_group(self):
+        payload = await request.json(default={})
+        group_id = str(payload.get("id", "")).strip() if isinstance(payload, dict) else ""
+        if not group_id:
+            return json_response({"ok": False, "error": "missing group id"})
+        current = [x for x in self._stored_groups() if x["id"] != group_id]
+        return json_response({"ok": True, "groups": self._persist_groups(current)})
+
+    async def update_group(self):
+        payload = await request.json(default={})
+        item = payload.get("group") if isinstance(payload, dict) else None
+        if not isinstance(item, dict) or not str(item.get("id", "")).strip():
+            return json_response({"ok": False, "error": "missing group"})
+        group_id = str(item["id"]).strip()
+        current = self._stored_groups()
+        for index, group in enumerate(current):
+            if group["id"] == group_id:
+                current[index] = {**group, **item, "id": group_id}
+                break
+        else:
+            current.append(item)
+        return json_response({"ok": True, "groups": self._persist_groups(current)})
 
     async def get_config(self):
         data = self._settings()
