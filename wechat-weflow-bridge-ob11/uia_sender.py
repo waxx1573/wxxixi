@@ -329,6 +329,7 @@ class UiaSender(BaseSender):
         纯键盘方案：剪贴板 → Ctrl+V → Enter
         """
         with self._lock, self._automation_session():
+            self.last_failure_retryable = False
             if not self._ready:
                 # WeChat may start after the bridge (e.g. after a reboot).
                 # Retry discovery lazily instead of requiring a bridge restart.
@@ -338,9 +339,11 @@ class UiaSender(BaseSender):
                 self._ready = self._window is not None
                 if not self._ready:
                     log.error("UIA Sender 未就绪")
+                    self.last_failure_retryable = True
                     return False
 
             if not self._ensure_window():
+                self.last_failure_retryable = True
                 return False
 
             # 安全检查：过滤 PIL 引用
@@ -349,12 +352,15 @@ class UiaSender(BaseSender):
                 return False
 
             if not self._activate():
+                self.last_failure_retryable = True
                 return False
             auto = self._auto
 
             # 切换到联系人
             if self.search_enabled and contact:
                 if not self._switch_contact(contact):
+                    # No clipboard or keyboard input has happened yet.
+                    self.last_failure_retryable = True
                     return False
 
             try:

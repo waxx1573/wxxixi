@@ -122,15 +122,25 @@ async def _handle_ob_api(data: dict):
                             if now - stamp < 120
                         }
                         bridge._sent_recently[text] = now
-                    send_started = time.time()
-                    try:
-                        sent = await asyncio.to_thread(state.sender_instance.send_text, contact, text)
+                    sent = False
+                    for attempt in range(2):
+                        send_started = time.time()
+                        try:
+                            sent = await asyncio.to_thread(state.sender_instance.send_text, contact, text)
+                            if sent:
+                                sent = await asyncio.to_thread(_verify_text_delivery, contact, text, send_started)
+                        except Exception as exc:
+                            sent = False
+                            delivery_error = f"微信文字发送异常: {type(exc).__name__}"
+                            log.error("[OB11] 文字发送异常: %s (%s)", contact, type(exc).__name__)
                         if sent:
-                            sent = await asyncio.to_thread(_verify_text_delivery, contact, text, send_started)
-                    except Exception as exc:
-                        sent = False
-                        delivery_error = f"微信文字发送异常: {type(exc).__name__}"
-                        log.error("[OB11] 文字发送异常: %s (%s)", contact, type(exc).__name__)
+                            break
+                        retryable = bool(getattr(state.sender_instance, "last_failure_retryable", False))
+                        if attempt == 0 and retryable:
+                            log.warning("[OB11] 发送在输入前被打断，3 秒后安全重试: %s", contact)
+                            await asyncio.sleep(3)
+                            continue
+                        break
                     if sent:
                         log.info(f"[OB11] 微信回读确认文字已发送: {contact}")
                     else:

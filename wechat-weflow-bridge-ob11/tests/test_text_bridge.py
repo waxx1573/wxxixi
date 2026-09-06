@@ -146,6 +146,31 @@ class TextBridgeTests(unittest.TestCase):
         self.assertEqual(response['retcode'], 1200)
         self.assertIn('RuntimeError', response['data']['error'])
 
+    def test_pre_input_interruption_retries_once(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state._ob_id_to_contact[456] = 'TestGroup'
+        sender = Mock()
+        attempts = 0
+
+        def send_text(contact, text):
+            nonlocal attempts
+            attempts += 1
+            sender.last_failure_retryable = attempts == 1
+            return attempts == 2
+
+        sender.send_text.side_effect = send_text
+        state.sender_instance = sender
+        with patch.object(ob_protocol, '_verify_text_delivery', return_value=True), \
+             patch.object(ob_protocol.asyncio, 'sleep', new=AsyncMock()) as sleep:
+            asyncio.run(ob_protocol._handle_ob_api(dict(
+                action='send_group_msg_verified', echo='retried',
+                params={'group_id': '456', 'message': [{'type': 'text', 'data': {'text': 'notice'}}]},
+            )))
+        self.assertEqual(sender.send_text.call_count, 2)
+        sleep.assert_awaited_once_with(3)
+        response = __import__('json').loads(state._ob_ws.send.await_args.args[0])
+        self.assertEqual(response['retcode'], 0)
+
     def test_failed_contact_switch_never_pastes_or_caches(self):
         sender = UiaSender.__new__(UiaSender)
         sender._lock = __import__('threading').Lock()
@@ -158,6 +183,7 @@ class TextBridgeTests(unittest.TestCase):
         sender._last_contact = ''
         sender.search_enabled = True
         self.assertFalse(sender.send_text('TestGroup', 'hello'))
+        self.assertTrue(sender.last_failure_retryable)
         self.assertEqual(sender._last_contact, '')
         sender._auto.SendKeys.assert_not_called()
 
