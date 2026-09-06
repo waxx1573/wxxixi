@@ -160,14 +160,14 @@ class TextBridgeTests(unittest.TestCase):
 
         sender.send_text.side_effect = send_text
         state.sender_instance = sender
-        with patch.object(ob_protocol, '_verify_text_delivery', return_value=True), \
-             patch.object(ob_protocol.asyncio, 'sleep', new=AsyncMock()) as sleep:
+        sender.wait_until_user_idle.return_value = True
+        with patch.object(ob_protocol, '_verify_text_delivery', return_value=True):
             asyncio.run(ob_protocol._handle_ob_api(dict(
                 action='send_group_msg_verified', echo='retried',
                 params={'group_id': '456', 'message': [{'type': 'text', 'data': {'text': 'notice'}}]},
             )))
         self.assertEqual(sender.send_text.call_count, 2)
-        sleep.assert_awaited_once_with(3)
+        sender.wait_until_user_idle.assert_called_once_with(5.0, 90.0)
         response = __import__('json').loads(state._ob_ws.send.await_args.args[0])
         self.assertEqual(response['retcode'], 0)
 

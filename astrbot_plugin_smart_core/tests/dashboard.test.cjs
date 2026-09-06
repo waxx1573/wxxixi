@@ -56,7 +56,7 @@ test('waits for bridge context before loading or permitting saves', async () => 
   assert.equal(p.elements.get('save').disabled, true);
   ready();
   await tick();
-  assert.deepEqual(p.calls, ['ready', ['GET', 'page/config']]);
+  assert.deepEqual(p.calls, ['ready', ['GET', 'page/config'], ['GET', 'page/groups']]);
   assert.equal(p.elements.get('save').disabled, false);
 });
 
