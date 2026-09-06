@@ -147,10 +147,12 @@ class UiaSender(BaseSender):
                 return False
             self._window.SetActive()
             if self._auto.GetForegroundWindow() == hwnd:
+                self._active_hwnd = hwnd
                 return True
             self._auto.SwitchToThisWindow(hwnd)
             time.sleep(0.2)
             if self._auto.GetForegroundWindow() == hwnd:
+                self._active_hwnd = hwnd
                 return True
             user32 = ctypes.windll.user32
             current_tid = ctypes.windll.kernel32.GetCurrentThreadId()
@@ -170,6 +172,7 @@ class UiaSender(BaseSender):
                     user32.AttachThreadInput(current_tid, tid, False)
             time.sleep(0.2)
             if self._auto.GetForegroundWindow() == hwnd:
+                self._active_hwnd = hwnd
                 return True
         except Exception as exc:
             log.error("微信激活异常: %s", type(exc).__name__)

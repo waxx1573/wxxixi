@@ -194,6 +194,15 @@ class TextBridgeTests(unittest.TestCase):
         sender._auto.SwitchToThisWindow.assert_called_once_with(123)
         sender._auto.SendKeys.assert_not_called()
 
+    def test_activation_replaces_stale_editor_window_handle(self):
+        sender = UiaSender.__new__(UiaSender)
+        sender._active_hwnd = 456
+        sender._window = Mock(NativeWindowHandle=123)
+        sender._auto = Mock()
+        sender._auto.GetForegroundWindow.return_value = 123
+        self.assertTrue(sender._activate())
+        self.assertEqual(sender._active_hwnd, 123)
+
     def contact_sender(self):
         sender = UiaSender.__new__(UiaSender)
         sender._ensure_window = Mock(return_value=True)
