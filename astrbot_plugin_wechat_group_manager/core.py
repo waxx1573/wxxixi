@@ -128,17 +128,18 @@ class Engine:
     def __init__(self, store: Store, config: dict) -> None:
         self.store, self.config = store, config
 
-    def evaluate(self, group: str, sender: str, text: str) -> Decision:
-        folded = text.casefold()
-        for word in [str(item).casefold() for item in self.config.get("blocked_words", []) if str(item).strip()]:
-            if word in folded:
-                return Decision("review", f"命中规则关键词：{word}", category="blocked_word")
-        domains = [str(item).casefold() for item in self.config.get("ad_domains", []) if str(item).strip()]
-        for domain in URL_RE.findall(text):
-            if any(domain.casefold() == item or domain.casefold().endswith("." + item) for item in domains):
-                return Decision("review", f"命中广告域名：{domain}", category="advertising")
-        count, repeat = self.store.count_messages(group, sender, text, int(self.config.get("flood_window_seconds", 10)))
-        if count > int(self.config.get("max_messages_per_window", 6)) or repeat >= 3:
-            return Decision("review", f"疑似刷屏：窗口消息={count}，重复={repeat}", category="flood")
+    def evaluate(self, group: str, sender: str, text: str, *, moderation_enabled: bool = True) -> Decision:
+        if moderation_enabled:
+            folded = text.casefold()
+            for word in [str(item).casefold() for item in self.config.get("blocked_words", []) if str(item).strip()]:
+                if word in folded:
+                    return Decision("review", f"命中规则关键词：{word}", category="blocked_word")
+            domains = [str(item).casefold() for item in self.config.get("ad_domains", []) if str(item).strip()]
+            for domain in URL_RE.findall(text):
+                if any(domain.casefold() == item or domain.casefold().endswith("." + item) for item in domains):
+                    return Decision("review", f"命中广告域名：{domain}", category="advertising")
+            count, repeat = self.store.count_messages(group, sender, text, int(self.config.get("flood_window_seconds", 10)))
+            if count > int(self.config.get("max_messages_per_window", 6)) or repeat >= 3:
+                return Decision("review", f"疑似刷屏：窗口消息={count}，重复={repeat}", category="flood")
         keyword = self.store.keyword(group, text)
         return Decision("keyword", f"命中关键词：{keyword[0]}", reply=keyword[1]) if keyword else Decision("none")

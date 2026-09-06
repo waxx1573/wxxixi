@@ -11,7 +11,7 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.platform import MessageType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
-from .core import Engine, RUN_LEVELS, Store
+from .core import Decision, Engine, RUN_LEVELS, Store
 from .announcement import parse_announcement
 
 
@@ -22,6 +22,7 @@ class Main(star.Star):
         root = Path(get_astrbot_data_path()) / "plugin_data" / "astrbot_plugin_wechat_group_manager"
         self.store = Store(root / "group_manager.sqlite3")
         self.engine = Engine(self.store, self.config)
+        self._smart_config_path = Path(get_astrbot_data_path()) / "astrbot_plugin_smart_core.json"
         self._config_path = (
             Path(get_astrbot_data_path())
             / "config"
@@ -140,6 +141,20 @@ class Main(star.Star):
                 target = str(getattr(part, "qq", None) or getattr(part, "target", None) or getattr(part, "user_id", ""))
                 return not self._set("bot_self_ids") or target in self._set("bot_self_ids")
         return False
+
+    def _smart_settings(self) -> dict:
+        try:
+            value = json.loads(self._smart_config_path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _smart_group(self, group_id: str) -> dict:
+        settings = self._smart_settings()
+        for item in settings.get("groups", []):
+            if isinstance(item, dict) and str(item.get("id", "")).strip() == str(group_id):
+                return item
+        return {}
 
     def _state(self, group: str) -> dict:
         level = str(self.config.get("default_run_level", "capture"))
@@ -275,11 +290,21 @@ class Main(star.Star):
             event.stop_event()
             return
         allowed, stable = self._allowed(event)
+        smart_settings = self._smart_settings()
+        smart_group = self._smart_group(group)
+        if not bool(smart_settings.get("enabled", True)):
+            event.stop_event()
+            return
+        if smart_group and (not bool(smart_group.get("enabled", True)) or not bool(smart_group.get("ppbot", True))):
+            event.stop_event()
+            return
         if not allowed:
             if self.config.get("block_unmanaged_wechat_groups", True):
                 event.stop_event()
             return
-        decision = self.engine.evaluate(group, sender, text)
+        moderation_enabled = bool(smart_settings.get("moderation_enabled", True))
+        moderation_level = str(smart_group.get("moderation", "standard")) if smart_group else "standard"
+        decision = self.engine.evaluate(group, sender, text, moderation_enabled=moderation_enabled and moderation_level != "off")
         if decision.action == "review":
             event_id = self.store.add_event(group, sender, decision.category, decision.reason, text)
             self.store.audit(group, sender, "moderation", "queued", f"event={event_id}; {decision.reason}")

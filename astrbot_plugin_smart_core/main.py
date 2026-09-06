@@ -4,6 +4,7 @@ import sqlite3
 import time
 import copy
 import asyncio
+import random
 import urllib.request
 from collections import OrderedDict
 from pathlib import Path
@@ -414,14 +415,51 @@ class Main(star.Star):
         session = str(getattr(event, "unified_msg_origin", "") or "")
         return hashlib.sha256((session + "\0" + text).encode()).hexdigest()
 
+    @staticmethod
+    def _event_group_id(event) -> str:
+        try:
+            return str(event.get_group_id() or "").split("#", 1)[0].strip()
+        except Exception:
+            return ""
+
+    def _managed_group(self, group_id: str):
+        if not group_id:
+            return None
+        for group in self._stored_groups():
+            if str(group.get("id", "")) == group_id:
+                return group
+        return None
+
     @filter.on_llm_request()
     async def smart_policy(self, event: AstrMessageEvent, req) -> None:
+        settings = self._settings()
+        try:
+            self.cooldown = max(0.0, float(settings.get("cooldown_seconds", self.cooldown)))
+        except (TypeError, ValueError):
+            self.cooldown = max(0.0, self.cooldown)
         self._requests += 1
+        group_id = self._event_group_id(event)
+        if not bool(settings.get("enabled", True)):
+            logger.info("Smart Core: globally disabled, request stopped")
+            event.stop_event()
+            return
+        if group_id:
+            group = self._managed_group(group_id)
+            if group is None or not group.get("enabled", True) or not group.get("ppbot", True):
+                logger.info("Smart Core: unmanaged or disabled group stopped (%s)", group_id)
+                event.stop_event()
+                return
+        probability = min(1.0, max(0.0, float(settings.get("reply_probability", 1.0))))
+        if probability <= 0.0 or (probability < 1.0 and random.random() >= probability):
+            logger.info("Smart Core: reply probability skipped request (%.3f)", probability)
+            event.stop_event()
+            return
         now = time.monotonic()
         key = self._message_key(event)
         previous = self._recent.get(key)
         if previous is not None and now - previous < self.cooldown:
             logger.info("Smart Core: duplicate request suppressed (%s)", key[:8])
+            event.stop_event()
             return
         self._recent[key] = now
         self._recent.move_to_end(key)
