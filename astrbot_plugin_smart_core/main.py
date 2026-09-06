@@ -167,7 +167,7 @@ class Main(star.Star):
             for value in data["model_roles"].values():
                 provider_ids.extend(str(value).split(","))
             manager = getattr(self.context, "provider_manager", None)
-            for attr in ("providers", "provider_instances", "provider_insts", "inst_map", "provider_sources_config", "providers_config"):
+            for attr in ("providers", "provider_instances", "provider_insts", "inst_map"):
                 values = getattr(manager, attr, None) if manager is not None else None
                 if isinstance(values, dict):
                     provider_ids.extend(str(key) for key in values)
