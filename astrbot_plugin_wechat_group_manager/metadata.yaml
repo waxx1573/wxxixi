@@ -1,0 +1,5 @@
+name: astrbot_plugin_wechat_group_manager
+desc: Fail-closed WeFlow/AstrBot group policy, soft moderation and audit prototype.
+author: waxx
+version: 0.2.0
+repo: https://github.com/waxx1573/wxxixi

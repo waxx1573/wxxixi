@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Smart Core</title>
+  <style>
+    :root { --pink:#db6b92; --pink-dark:#c94e7d; --line:#f1d8e1; --ink:#5b3d49; --muted:#927582; --danger:#b54545; }
+    * { box-sizing:border-box; }
+    body { margin:0; font:14px system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--ink); background:#fff7fa; }
+    button,input,select { font:inherit; }
+    .app { display:flex; min-height:900px; }
+    .side { width:190px; flex:0 0 190px; background:#fbe4ed; border-right:1px solid var(--line); padding:28px 14px; }
+    .brand { margin:0 14px 34px; color:var(--pink-dark); font-size:22px; font-weight:700; }
+    .nav { display:block; width:100%; margin:4px 0; padding:13px 14px; border:0; border-radius:7px; background:transparent; color:var(--ink); text-align:left; cursor:pointer; }
+    .nav.active,.nav:hover { background:#e979a1; color:#fff; }
+    .main { flex:1; min-width:0; max-width:1100px; padding:30px 38px; }
+    .head { display:flex; justify-content:space-between; align-items:center; margin-bottom:24px; padding-bottom:18px; border-bottom:1px solid var(--line); }
+    .head h1 { margin:0; font-size:27px; }
+    .badge { padding:6px 12px; border-radius:12px; background:#f8d7e3; color:#b45276; font-size:12px; }
+    .panel { display:none; padding:22px; border:1px solid var(--line); border-radius:8px; background:#fff; box-shadow:0 2px 8px #d98ca51a; }
+    .panel.active { display:block; }
+    .panel h2 { margin:0 0 6px; font-size:19px; }
+    .desc { margin:0 0 20px; color:var(--muted); }
+    .row { display:grid; grid-template-columns:1fr 1fr; gap:18px; padding:16px 0; border-top:1px solid #f6e7ed; }
+    .row:first-of-type { border-top:0; }
+    .field label { display:block; margin-bottom:7px; font-weight:600; }
+    .field small { display:block; margin-top:5px; color:var(--muted); }
+    .field input,.field select,.group-item input,.group-item select { width:100%; padding:10px; border:1px solid #e8c9d5; border-radius:6px; background:#fff; color:var(--ink); }
+    .switch { display:flex!important; align-items:center; gap:10px; }
+    .switch input { width:auto; }
+    .toolbar { display:grid; grid-template-columns:minmax(180px,1fr) minmax(160px,1fr) auto; gap:10px; align-items:end; margin-bottom:18px; }
+    .toolbar label { display:block; margin-bottom:7px; font-weight:600; }
+    .button { min-height:39px; padding:9px 16px; border:0; border-radius:6px; background:var(--pink); color:#fff; cursor:pointer; }
+    .group-list { display:grid; gap:10px; }
+    .group-item { display:grid; grid-template-columns:minmax(150px,1.2fr) minmax(120px,1fr) 82px 105px minmax(125px,.9fr) minmax(115px,.8fr) 40px; gap:10px; align-items:center; padding:12px; border:1px solid var(--line); border-radius:7px; }
+    .group-head { color:var(--muted); font-size:12px; font-weight:600; }
+    .group-item .toggle { display:flex; justify-content:center; }
+    .group-item .toggle input { width:18px; height:18px; }
+    .icon-button { width:36px; height:36px; border:1px solid #efc5c5; border-radius:6px; background:#fff; color:var(--danger); cursor:pointer; font-size:20px; line-height:1; }
+    .empty { padding:26px; border:1px dashed #e8c9d5; color:var(--muted); text-align:center; }
+    .actions { display:flex; align-items:center; margin-top:22px; }
+    .msg { margin-left:12px; color:#38865d; }
+    .msg.error { color:var(--danger); }
+    @media(max-width:900px) { .group-head { display:none; } .group-item { grid-template-columns:1fr 1fr; } .group-item .toggle { justify-content:flex-start; } }
+    @media(max-width:700px) { .app { display:block; } .side { width:100%; padding:14px; border-right:0; border-bottom:1px solid var(--line); } .brand { margin:0 0 12px; } .nav { display:inline-block; width:auto; } .main { padding:20px; } .row,.toolbar,.group-item { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="side">
+      <div class="brand">Smart Core</div>
+      <button class="nav active" data-tab="overview">控制面板</button>
+      <button class="nav" data-tab="groups">群管理</button>
+      <button class="nav" data-tab="decision">智能决策</button>
+      <button class="nav" data-tab="moderation">内容审核</button>
+      <button class="nav" data-tab="reply">回复策略</button>
+      <button class="nav" data-tab="memory">记忆与 RAG</button>
+      <button class="nav" data-tab="models">模型路由</button>
+    </aside>
+    <main class="main">
+      <div class="head"><h1 id="title">控制面板</h1><span class="badge">AstrBot 插件</span></div>
+      <section class="panel active" data-panel="overview"><h2>Smart 能力总览</h2><p class="desc">Akasha 只负责微信接入，Smart Core 在 AstrBot 内统一处理决策、审核、记忆和回复。</p><div class="row"><div class="field"><label class="switch"><input id="enabled" type="checkbox">启用 Smart Core</label><small>关闭后由 AstrBot 使用原生回复流程。</small></div><div class="field"><label>视觉处理归属</label><select id="vision_owner"><option value="astrbot">AstrBot Smart（推荐）</option><option value="akasha">Akasha（兼容旧链路）</option></select></div></div></section>
+      <section class="panel" data-panel="groups"><h2>群管理</h2><p class="desc">按微信桥接上报的稳定群 ID 管理群。保存后白名单和运行状态立即同步。</p><div class="toolbar"><div><label for="new_group_id">群 ID</label><input id="new_group_id" placeholder="稳定群 ID"></div><div><label for="new_group_name">群名称</label><input id="new_group_name" placeholder="便于识别，可选"></div><button class="button" id="add_group" type="button">添加群</button></div><div class="group-item group-head" aria-hidden="true"><span>群 ID</span><span>群名称</span><span>管理</span><span>PPBot 回复</span><span>回复方式</span><span>审核级别</span><span></span></div><div class="group-list" id="group_list"></div></section>
+      <section class="panel" data-panel="decision"><h2>智能决策</h2><p class="desc">在生成回复前判断消息属于回复、忽略、命令或需要审核。</p><div class="row"><div class="field"><label>决策模式</label><select id="reply_mode"><option value="smart">Smart 判断</option><option value="all">全部进入模型</option><option value="mention">仅 @ 或唤醒</option></select></div><div class="field"><label>冷却时间（秒）</label><input id="cooldown_seconds" type="number" min="0" step="0.5"></div></div></section>
+      <section class="panel" data-panel="moderation"><h2>内容审核</h2><p class="desc">在回复前执行基础安全边界，后续可扩展关键词、正则和 LLM 审核。</p><div class="row"><div class="field"><label class="switch"><input id="moderation_enabled" type="checkbox">启用内容审核</label></div><div class="field"><label class="switch"><input id="fallback_enabled" type="checkbox">审核失败时使用安全降级</label></div></div></section>
+      <section class="panel" data-panel="reply"><h2>回复策略</h2><p class="desc">控制回复概率、重复消息和模型失败后的行为。</p><div class="row"><div class="field"><label>回复概率</label><input id="reply_probability" type="number" min="0" max="1" step="0.05"><small>0 到 1，1 表示每条符合条件的消息都回复。</small></div><div class="field"><label>冷却与去重</label><input value="由 Smart Core 自动维护" disabled></div></div></section>
+      <section class="panel" data-panel="memory"><h2>记忆与 RAG</h2><p class="desc">为后续接入短期上下文、长期记忆、知识库和向量检索预留统一开关。</p><div class="row"><div class="field"><label class="switch"><input id="memory_enabled" type="checkbox">启用会话记忆</label></div><div class="field"><label class="switch"><input id="rag_enabled" type="checkbox">启用知识库 RAG</label></div></div></section>
+      <section class="panel" data-panel="models"><h2>模型路由</h2><p class="desc">按任务选择 AstrBot provider。这里只保存 provider ID，不显示或修改 API 密钥。</p><div class="row"><div class="field"><label>主回复 provider</label><input id="role_main" placeholder="deepseek_main"></div><div class="field"><label>主回复备用顺序</label><input id="role_fallback" placeholder="gemini_aux,gpt_backup"></div></div><div class="row"><div class="field"><label>视觉 provider</label><input id="role_vision" placeholder="gemini_aux 或 Ollama provider"></div><div class="field"><label>上下文压缩 provider</label><input id="role_compress" placeholder="gemini_aux"></div></div><div class="row"><div class="field"><label>决策 provider</label><input value="由 Smart Core 决策提示统一调度" disabled></div><div class="field"><label>审核 provider</label><input value="由 Smart Core 决策提示统一调度" disabled></div></div></section>
+      <div class="actions"><button class="button" id="save" type="button" disabled>保存 Smart 配置</button><span class="msg" id="msg" role="status"></span></div>
+    </main>
+  </div>
+  <script src="/api/plugin/page/bridge-sdk.js"></script>
+  <script>
+    const configIds=['enabled','vision_owner','reply_mode','cooldown_seconds','moderation_enabled','fallback_enabled','reply_probability','memory_enabled','rag_enabled'];
+    const roleIds={main:'role_main',fallback:'role_fallback',vision:'role_vision',compress:'role_compress'};
+    let groups=[];
+    let configLoaded=false;
+    const saveButton=document.getElementById('save');
+    function escapeHtml(value){return String(value).replace(/[&<>\'\"]/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));}
+    function renderGroups(){const list=document.getElementById('group_list');if(!groups.length){list.innerHTML='<div class="empty">尚未添加群</div>';return;}list.innerHTML=groups.map((group,index)=>`<div class="group-item" data-index="${index}"><input data-field="id" value="${escapeHtml(group.id||'')}" aria-label="群 ID"><input data-field="name" value="${escapeHtml(group.name||'')}" aria-label="群名称"><label class="toggle" title="是否纳入群管理"><input data-field="enabled" type="checkbox" ${group.enabled!==false?'checked':''} aria-label="启用群管理"></label><label class="toggle" title="是否允许 PPBot 智能回复"><input data-field="ppbot" type="checkbox" ${group.ppbot!==false?'checked':''} aria-label="允许 PPBot 回复"></label><select data-field="reply_mode" aria-label="回复方式"><option value="mention" ${group.reply_mode!=='keyword'?'selected':''}>仅提及时回复</option><option value="keyword" ${group.reply_mode==='keyword'?'selected':''}>仅关键词回复</option></select><select data-field="moderation" aria-label="审核级别"><option value="off" ${group.moderation==='off'?'selected':''}>关闭</option><option value="standard" ${!group.moderation||group.moderation==='standard'?'selected':''}>标准</option><option value="strict" ${group.moderation==='strict'?'selected':''}>严格</option></select><button class="icon-button" data-remove="${index}" type="button" title="删除群" aria-label="删除群">×</button></div>`).join('');}
+    function collectGroups(){return [...document.querySelectorAll('.group-item[data-index]')].map(row=>{const result={};row.querySelectorAll('[data-field]').forEach(input=>result[input.dataset.field]=input.type==='checkbox'?input.checked:input.value.trim());return result;}).filter(group=>group.id);}
+    async function load(){
+      configLoaded=false;
+      saveButton.disabled=true;
+      const bridge=window.AstrBotPluginPage;
+      if(!bridge)throw new Error('页面连接未就绪，请刷新页面');
+      await bridge.ready();
+      const data=await bridge.apiGet('page/config');
+      if(!data||typeof data!=='object'||Array.isArray(data)||typeof data.enabled!=='boolean'||!Array.isArray(data.groups))throw new Error('读取配置失败，请刷新后重试');
+      configIds.forEach(key=>{const element=document.getElementById(key);if(element.type==='checkbox')element.checked=Boolean(data[key]);else element.value=data[key]??'';});
+      Object.entries(roleIds).forEach(([key,id])=>document.getElementById(id).value=(data.model_roles||{})[key]||'');
+      groups=data.groups;
+      renderGroups();
+      configLoaded=true;
+      saveButton.disabled=false;
+    }
+    async function save(){
+      if(!configLoaded||saveButton.disabled)return;
+      saveButton.disabled=true;
+      saveButton.textContent='保存中…';
+      showMessage('');
+      try{
+        const payload={groups:collectGroups(),model_roles:{}};
+        configIds.forEach(key=>{const element=document.getElementById(key);payload[key]=element.type==='checkbox'?element.checked:element.type==='number'?Number(element.value):element.value;});
+        Object.entries(roleIds).forEach(([key,id])=>payload.model_roles[key]=document.getElementById(id).value.trim());
+        const result=await window.AstrBotPluginPage.apiPost('page/config',payload);
+        if(!result||!result.ok)throw new Error(result?.error||'保存失败');
+        groups=result.groups||payload.groups;
+        renderGroups();
+        showMessage('已保存并同步群管理状态');
+      }finally{
+        saveButton.disabled=!configLoaded;
+        saveButton.textContent='保存 Smart 配置';
+      }
+    }
+    function showMessage(text,isError=false){const message=document.getElementById('msg');message.textContent=text;message.classList.toggle('error',isError);}
+    document.querySelectorAll('.nav').forEach(nav=>nav.addEventListener('click',()=>{document.querySelectorAll('.nav').forEach(item=>item.classList.remove('active'));document.querySelectorAll('.panel').forEach(item=>item.classList.remove('active'));nav.classList.add('active');document.querySelector(`[data-panel="${nav.dataset.tab}"]`).classList.add('active');document.getElementById('title').textContent=nav.textContent;}));
+    document.getElementById('add_group').addEventListener('click',()=>{const id=document.getElementById('new_group_id').value.trim();const name=document.getElementById('new_group_name').value.trim();groups=collectGroups();if(!id)return showMessage('请填写群 ID',true);if(groups.some(group=>group.id===id))return showMessage('这个群 ID 已存在',true);groups.push({id,name,enabled:true,ppbot:true,reply_mode:'mention',moderation:'standard'});document.getElementById('new_group_id').value='';document.getElementById('new_group_name').value='';renderGroups();showMessage('已添加，保存后生效');});
+    document.getElementById('group_list').addEventListener('click',event=>{const button=event.target.closest('[data-remove]');if(!button)return;groups=collectGroups();groups.splice(Number(button.dataset.remove),1);renderGroups();showMessage('已移除，保存后生效');});
+    document.getElementById('save').addEventListener('click',()=>save().catch(error=>showMessage(error.message,true)));load().catch(error=>showMessage(error.message,true));
+  </script>
+</body>
+</html>

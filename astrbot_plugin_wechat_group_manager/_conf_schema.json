@@ -1,0 +1,17 @@
+{
+  "platform_names": {"description": "AstrBot 平台实例 ID 或适配器类型", "type": "list", "items": {"type": "string"}, "default": ["waxx", "aiocqhttp"]},
+  "allowed_group_ids": {"description": "已认证的稳定群 ID", "type": "list", "items": {"type": "string"}, "default": []},
+  "bootstrap_group_names": {"description": "仅用于 capture 引导的群名", "type": "list", "items": {"type": "string"}, "default": ["记录"]},
+  "administrator_ids": {"description": "有权执行 /wx 的稳定发送者 ID；display_only 身份不得加入", "type": "list", "items": {"type": "string"}, "default": []},
+  "group_admin_whitelist": {"description": "每群管理员白名单，格式 group_id=user_id；机器人 bot_self_ids 自动拥有管理权限", "type": "list", "items": {"type": "string"}, "default": []},
+  "bot_self_ids": {"description": "机器人账号的平台用户 ID", "type": "list", "items": {"type": "string"}, "default": ["900000000000000001"]},
+  "default_run_level": {"description": "capture、shadow、assisted 或 active", "type": "string", "default": "capture"},
+  "reply_mode": {"description": "mention 或 keyword", "type": "string", "default": "mention"},
+  "block_unmanaged_wechat_groups": {"description": "阻止非白名单微信群进入默认 AI", "type": "bool", "default": true},
+  "quiet_hours": {"description": "本地静默起止时间", "type": "list", "items": {"type": "string"}, "default": ["23:00", "08:00"]},
+  "max_messages_per_window": {"description": "刷屏窗口消息阈值", "type": "int", "default": 6},
+  "flood_window_seconds": {"description": "刷屏检测窗口秒数", "type": "int", "default": 10},
+  "blocked_words": {"description": "进入人工处理的禁词", "type": "list", "items": {"type": "string"}, "default": []},
+  "ad_domains": {"description": "进入人工处理的广告域名", "type": "list", "items": {"type": "string"}, "default": []},
+  "rules_text": {"description": "默认群规", "type": "string", "default": "请友善交流，不刷屏，不发布未经确认的广告和风险链接。"}
+}

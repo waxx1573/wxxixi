@@ -1,41 +1,11 @@
-# Python
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Build artifacts
-build/
-dist/
-*.egg-info/
-.eggs/
-
-# Virtual environments
-.venv/
-venv/
-.smoke-venv/
-
-# 本地配置与密钥（config.local.py 覆盖 config.py，绝不入库）
-config.local.py
-.env
-
-# 离线依赖缓存
-libs/
-
-# 运行时生成的数据
-chat_contexts.json
-user_timers.json
-core_memory/
-CoreMemory/
-memory_temp/
-Memory_Temp/
-forum_data/npc_config.json
-data/
-*.db
-*.db-*
-
-# 日志
 *.log
-COMMIT_MSG.txt
-
-# 演示截图（个人聊天截图不应入库；替换为脱敏截图后可放回 Demo_Image/）
-Demo_Image/
+*.pid
+.env
+config.json
+wechat-weflow-bridge-ob11/config.json
+wechat-weflow-bridge-ob11/wechat_images/
+.pytest_cache/
+.mypy_cache/
+.coverage

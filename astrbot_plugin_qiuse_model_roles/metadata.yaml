@@ -1,0 +1,5 @@
+name: astrbot_plugin_qiuse_model_roles
+display_name: Qiuse Model Roles
+desc: Auxiliary model roles with ordered fallback for text and vision helper tasks.
+version: v0.2.0
+author: qiuse
