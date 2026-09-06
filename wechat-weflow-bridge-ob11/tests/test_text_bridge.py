@@ -228,6 +228,9 @@ class TextBridgeTests(unittest.TestCase):
         sender._auto.GetForegroundWindow.return_value = 123
         self.assertTrue(sender._activate())
         self.assertEqual(sender._active_hwnd, 123)
+        sender._auto.ShowWindow.assert_called_once_with(123, sender._auto.SW.Restore)
+        sender._auto.BringWindowToTop.assert_called_once_with(123)
+        sender._auto.SetForegroundWindow.assert_called_once_with(123)
 
     def contact_sender(self):
         sender = UiaSender.__new__(UiaSender)

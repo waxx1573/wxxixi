@@ -145,7 +145,13 @@ class UiaSender(BaseSender):
             hwnd = self._window.NativeWindowHandle
             if not hwnd:
                 return False
+            # Foreground ownership alone is insufficient when another desktop
+            # window covers WeChat: its chat pane may remain unrendered.
+            self._auto.ShowWindow(hwnd, self._auto.SW.Restore)
             self._window.SetActive()
+            self._auto.BringWindowToTop(hwnd)
+            self._auto.SetForegroundWindow(hwnd)
+            time.sleep(0.2)
             if self._auto.GetForegroundWindow() == hwnd:
                 self._active_hwnd = hwnd
                 return True
@@ -315,7 +321,7 @@ class UiaSender(BaseSender):
             log.info("已选择目标会话，等待输入框校验: %s", contact)
             return True
         except Exception as exc:
-            log.error("切换联系人失败: %s", type(exc).__name__)
+            log.error("切换联系人失败: %s: %s", type(exc).__name__, exc)
             return False
 
     # ================================================================
