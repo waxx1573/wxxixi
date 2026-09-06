@@ -226,9 +226,17 @@ class Main(star.Star):
         if isinstance(groups, list):
             removed_ids = {str(x).strip() for x in (values.get("removed_group_ids") or []) if str(x).strip()}
             existing_items = [dict(x) for x in data.get("groups", []) if isinstance(x, dict) and x.get("id")]
+            try:
+                persisted_manager = json.loads(self._group_config_path.read_text(encoding="utf-8-sig"))
+                persisted_groups = persisted_manager.get("smart_groups", []) if isinstance(persisted_manager, dict) else []
+                if not existing_items and isinstance(persisted_groups, list):
+                    existing_items = [dict(x) for x in persisted_groups if isinstance(x, dict) and x.get("id")]
+            except (OSError, json.JSONDecodeError):
+                pass
             clean = []
             seen = set()
-            for item in existing_items + groups:
+            # Submitted rows win; persisted rows fill in rows omitted by a stale page.
+            for item in groups + existing_items:
                 if not isinstance(item, dict):
                     continue
                 group_id = str(item.get("id", "")).strip()
