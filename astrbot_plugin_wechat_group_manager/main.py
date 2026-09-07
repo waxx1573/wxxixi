@@ -142,6 +142,16 @@ class Main(star.Star):
                 return not self._set("bot_self_ids") or target in self._set("bot_self_ids")
         return False
 
+    @staticmethod
+    def _allow_llm(state_reply_mode: str, smart_mode: str, mentioned: bool) -> bool:
+        if state_reply_mode == "keyword":
+            return False
+        if smart_mode == "mention":
+            return mentioned
+        if smart_mode in {"smart", "all"}:
+            return True
+        return mentioned
+
     def _smart_settings(self) -> dict:
         try:
             value = json.loads(self._smart_config_path.read_text(encoding="utf-8"))
@@ -315,6 +325,7 @@ class Main(star.Star):
             yield event.plain_result(decision.reply)
             event.stop_event()
             return
-        if state["run_level"] == "active" and state["reply_mode"] == "mention" and self._mentioned(event):
+        smart_mode = str(smart_settings.get("reply_mode", "smart"))
+        if self._allow_llm(state["reply_mode"], smart_mode, self._mentioned(event)):
             return
         event.stop_event()

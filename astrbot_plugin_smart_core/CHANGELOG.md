@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0 - Wire Smart prompts into WeChat replies
+
+- Inject the WeChat casual prompt into real group LLM requests instead of only registering a persona.
+- Run the Smart decision prompt before group replies in `smart` mode; failed decisions stop the request.
+- Let the global `smart` and `all` modes reach the LLM after group-manager safety checks.
+
 ## 0.4.0 - WeChat prompt personas
 
 - Adapt Smart decision, moderation, casual-chat, and management-intent prompts for WeChat.
