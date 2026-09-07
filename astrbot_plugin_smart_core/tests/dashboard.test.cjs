@@ -53,12 +53,13 @@ function page(options = {}) {
     fetch() { throw new Error('Direct fetch is forbidden in the plugin iframe'); },
   });
   vm.runInContext(script, context);
-  return { calls, elements, save: () => vm.runInContext('save()', context) };
+  return { calls, elements, save: () => vm.runInContext('save()', context), saveModels: () => vm.runInContext("save('models')", context) };
 }
 
 test('SDK loads before inline code; save begins disabled', () => {
   assert.ok(html.indexOf('src="/api/plugin/page/bridge-sdk.js"') < html.indexOf('<script>'));
   assert.match(html, /id="save"[^>]*disabled/);
+  assert.match(html, /id="save_models"[^>]*disabled/);
   assert.match(html, /href="\.\/smart-core\.css"/);
   assert.match(css, /grid-template-columns:\s*156px minmax\(0, 1fr\)/);
 });
@@ -100,6 +101,7 @@ test('waits for bridge context before loading or permitting saves', async () => 
   await tick();
   assert.deepEqual(p.calls, ['ready', ['GET', 'page/config'], ['GET', 'page/groups']]);
   assert.equal(p.elements.get('save').disabled, false);
+  assert.equal(p.elements.get('save_models').disabled, false);
 });
 
 test('loaded values are sent through the plugin bridge', async () => {
@@ -112,6 +114,18 @@ test('loaded values are sent through the plugin bridge', async () => {
   assert.equal(post[2].cooldown_seconds, 3);
   assert.equal(post[2].model_roles.main, 'main-provider');
   assert.match(p.elements.get('msg').textContent, /已保存/);
+});
+
+test('model route save only posts model role fields', async () => {
+  const p = page();
+  await tick();
+  await p.saveModels();
+  const posts = p.calls.filter(call => call[0] === 'POST');
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0][1], 'page/config');
+  assert.deepEqual(Object.keys(posts[0][2]), ['model_roles']);
+  assert.equal(posts[0][2].model_roles.main, 'main-provider');
+  assert.match(p.elements.get('model_msg').textContent, /已保存模型路由/);
 });
 
 for (const option of ['noBridge', 'loadError', 'invalidData']) {
@@ -135,6 +149,7 @@ test('pending save prevents duplicate submission and resets after failure', asyn
   reject(new Error('backend unavailable'));
   await assert.rejects(save, /backend unavailable/);
   assert.equal(p.elements.get('save').disabled, false);
+  assert.equal(p.elements.get('save_models').disabled, false);
 });
 
 test('backend rejection does not display a success message', async () => {
