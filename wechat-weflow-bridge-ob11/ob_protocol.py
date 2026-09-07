@@ -12,12 +12,13 @@ import asyncio
 import base64
 import json
 import os
-import re
 import tempfile
 import time
 import logging
 
 import requests
+from markdown_it import MarkdownIt
+from markdown_it.tree import SyntaxTreeNode
 
 import state
 import config
@@ -25,45 +26,125 @@ import config
 log = logging.getLogger("ob11-bridge")
 
 
-_TABLE_SEPARATOR_RE = re.compile(
-    r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+_MARKDOWN_PARSER = MarkdownIt("commonmark", {"html": False}).enable(
+    ["table", "strikethrough"]
 )
 
 
+def _render_inline_markdown(node):
+    if node.type in ("text", "code_inline", "html_inline"):
+        return node.content
+    if node.type in ("softbreak", "hardbreak"):
+        return "\n"
+    if node.type == "image":
+        alt = "".join(_render_inline_markdown(child) for child in node.children)
+        alt = alt or node.content or "图片"
+        source = str(node.attrs.get("src", "")).strip()
+        return f"{alt}（{source}）" if source else alt
+    if node.type == "link":
+        label = "".join(_render_inline_markdown(child) for child in node.children)
+        href = str(node.attrs.get("href", "")).strip()
+        return f"{label}（{href}）" if href and href != label else label
+    return "".join(_render_inline_markdown(child) for child in node.children)
+
+
+def _render_list(node, depth=0):
+    lines = []
+    ordered = node.type == "ordered_list"
+    start = int(node.attrs.get("start", 1)) if ordered else 1
+
+    for index, item in enumerate(node.children):
+        text_blocks = []
+        nested_lists = []
+        for child in item.children:
+            if child.type in ("bullet_list", "ordered_list"):
+                nested_lists.append(child)
+            else:
+                rendered = _render_markdown_block(child, depth + 1)
+                if rendered:
+                    text_blocks.append(rendered)
+
+        item_lines = "\n".join(text_blocks).splitlines() or [""]
+        marker = f"{start + index}. " if ordered else "• "
+        indent = "  " * depth
+        continuation = "  " * (depth + 1)
+        lines.append(f"{indent}{marker}{item_lines[0]}")
+        lines.extend(f"{continuation}{line}" for line in item_lines[1:])
+        for nested in nested_lists:
+            lines.extend(_render_list(nested, depth + 1).splitlines())
+    return "\n".join(lines)
+
+
+def _render_table(node):
+    rows = []
+    for section in node.children:
+        for row in section.children:
+            cells = []
+            for cell in row.children:
+                value = "".join(
+                    _render_inline_markdown(child) for child in cell.children
+                ).strip()
+                cells.append(value)
+            rows.append("｜".join(cells))
+    return "\n".join(rows)
+
+
+def _render_markdown_block(node, depth=0):
+    if node.type in ("paragraph", "inline"):
+        return "".join(_render_inline_markdown(child) for child in node.children)
+    if node.type == "heading":
+        text = "".join(_render_inline_markdown(child) for child in node.children)
+        return f"【{text.strip()}】"
+    if node.type in ("bullet_list", "ordered_list"):
+        return _render_list(node, depth)
+    if node.type == "blockquote":
+        content = "\n".join(
+            part
+            for child in node.children
+            if (part := _render_markdown_block(child, depth))
+        )
+        return "\n".join(
+            f"引用：{line}" if line else "引用：" for line in content.splitlines()
+        )
+    if node.type in ("fence", "code_block"):
+        return node.content.rstrip("\n")
+    if node.type == "hr":
+        return "────────"
+    if node.type == "table":
+        return _render_table(node)
+    return "\n".join(
+        part
+        for child in node.children
+        if (part := _render_markdown_block(child, depth))
+    )
+
+
 def _format_text_for_wechat(text):
-    """Convert common Markdown into readable WeChat plain text."""
+    """Render CommonMark into readable text for the WeChat input box."""
     if not isinstance(text, str) or not text:
         return text
 
     value = text.replace("\r\n", "\n").replace("\r", "\n")
-    value = re.sub(r"```[^\n]*\n?", "", value)
-    value = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\1（\2）", value)
-    value = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1（\2）", value)
+    try:
+        root = SyntaxTreeNode(_MARKDOWN_PARSER.parse(value))
+    except Exception as exc:
+        log.warning("Markdown 转微信纯文本失败，保留原文: %s", type(exc).__name__)
+        return value
 
-    lines = []
-    for line in value.split("\n"):
-        if _TABLE_SEPARATOR_RE.match(line):
-            continue
-        heading = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
-        if heading:
-            line = f"【{heading.group(1)}】"
-        else:
-            line = re.sub(r"^(\s*)>+\s?", r"\1引用：", line)
-            line = re.sub(r"^(\s*)[-+*]\s+", r"\1• ", line)
-            if line.strip().startswith("|") and line.strip().endswith("|"):
-                cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-                line = "｜".join(cells)
-        lines.append(line.rstrip())
+    output = []
+    previous_end = None
+    for child in root.children:
+        if previous_end is not None and child.map and child.map[0] > previous_end:
+            output.append("")
+        rendered = _render_markdown_block(child)
+        if rendered:
+            output.extend(line.rstrip() for line in rendered.splitlines())
+        if child.map:
+            previous_end = child.map[1]
 
-    value = "\n".join(lines)
-    value = re.sub(r"`([^`\n]+)`", r"\1", value)
-    value = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", value)
-    value = re.sub(r"__([^_\n]+)__", r"\1", value)
-    value = re.sub(r"~~([^~\n]+)~~", r"\1", value)
-    value = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", value)
-    value = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"\1", value)
-    value = re.sub(r"\n{3,}", "\n\n", value)
-    return value
+    while output and not output[-1]:
+        output.pop()
+    return "\n".join(output)
 
 
 def _verify_text_delivery(contact, text, since):

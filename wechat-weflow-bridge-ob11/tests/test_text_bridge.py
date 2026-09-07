@@ -104,20 +104,35 @@ class TextBridgeTests(unittest.TestCase):
             '# Summary\n\n'
             'I **do not** have *independent* awareness.\n'
             '- first\n- second\n'
-            '> quoted\n'
+            '> quoted\n\n'
             '[docs](https://example.com) and `code`\n\n\n'
             '| Name | Value |\n| --- | ---: |\n| A | 1 |'
         )
         self.assertEqual(
             ob_protocol._format_text_for_wechat(source),
             '【Summary】\n\nI do not have independent awareness.\n'
-            '• first\n• second\n引用：quoted\n'
+            '• first\n• second\n引用：quoted\n\n'
             'docs（https://example.com） and code\n\nName｜Value\nA｜1',
         )
 
     def test_wechat_formatter_preserves_plain_text(self):
         text = '你好！\n普通文本 123，标点保持不变。'
         self.assertEqual(ob_protocol._format_text_for_wechat(text), text)
+
+    def test_wechat_formatter_preserves_complex_markdown_content(self):
+        cases = {
+            '**粗体里有 *斜体***': '粗体里有 斜体',
+            '~~删除线~~': '删除线',
+            '```json {"a": 1}```': 'json {"a": 1}',
+            '[示例](https://example.com/a_(b))': '示例（https://example.com/a_(b)）',
+            '标题\n===': '【标题】',
+            '---': '────────',
+            '- [x] 已完成': '• [x] 已完成',
+            r'不要转换 \*星号\* 和 snake_case': '不要转换 *星号* 和 snake_case',
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                self.assertEqual(ob_protocol._format_text_for_wechat(source), expected)
 
     def test_group_send_formats_before_cache_send_and_readback(self):
         state._ob_ws = types.SimpleNamespace(send=AsyncMock())
