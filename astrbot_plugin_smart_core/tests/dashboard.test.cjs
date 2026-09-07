@@ -12,15 +12,27 @@ const tick = () => new Promise(resolve => setImmediate(resolve));
 function page(options = {}) {
   const elements = new Map();
   for (const match of html.matchAll(/<[^>]+\bid="([^"]+)"[^>]*>/g)) {
-    elements.set(match[1], {
+    const id = match[1];
+    const element = {
       type: /type="([^"]+)"/.exec(match[0])?.[1] || 'text',
       value: '', checked: false, disabled: /\bdisabled\b/.test(match[0]),
       textContent: '', innerHTML: '', classList: { toggle() {} },
       addEventListener() {},
-    });
+    };
+    if (id.startsWith('role_')) {
+      let value = '';
+      Object.defineProperty(element, 'value', {
+        get: () => value,
+        set: next => {
+          const candidate = String(next ?? '');
+          value = !candidate || element.innerHTML.includes(`value="${candidate}"`) ? candidate : '';
+        },
+      });
+    }
+    elements.set(id, element);
   }
   const calls = [];
-  const data = { enabled: true, groups: [], cooldown_seconds: 3, reply_probability: 1,
+  const data = options.data || { enabled: true, groups: [], cooldown_seconds: 3, reply_probability: 1,
     model_roles: { main: 'main-provider', fallback: 'backup-provider' } };
   const bridge = {
     async ready() { if (options.ready) await options.ready; calls.push('ready'); },
@@ -59,6 +71,23 @@ test('navigation and dashboard summary use existing elements', async () => {
   assert.equal(p.elements.get('group_count').textContent, '0');
   assert.equal(p.elements.get('provider_count').textContent, '2');
   assert.equal(p.elements.get('groups_status').textContent, '0 个群');
+  assert.equal(p.elements.get('role_main').value, 'main-provider');
+  assert.equal(p.elements.get('role_fallback').value, 'backup-provider');
+});
+
+test('saved model roles are restored after provider options render', async () => {
+  const p = page();
+  await tick();
+  assert.match(p.elements.get('role_main').innerHTML, /main-provider/);
+  assert.equal(p.elements.get('role_main').value, 'main-provider');
+  assert.equal(p.elements.get('role_fallback').value, 'backup-provider');
+});
+
+test('a saved role remains visible when its provider is temporarily unavailable', async () => {
+  const p = page({ data: { enabled: true, groups: [], model_roles: { main: 'saved-provider' }, providers: ['other-provider'] } });
+  await tick();
+  assert.equal(p.elements.get('role_main').value, 'saved-provider');
+  assert.match(p.elements.get('role_main').innerHTML, /saved-provider（已保存，当前未加载）/);
 });
 
 test('waits for bridge context before loading or permitting saves', async () => {
