@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const { test } = require('node:test');
 
 const html = fs.readFileSync(path.join(__dirname, '../pages/dashboard/index.html'), 'utf8');
+const css = fs.readFileSync(path.join(__dirname, '../pages/dashboard/smart-core.css'), 'utf8');
 const script = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)][0][1];
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
@@ -46,6 +47,18 @@ function page(options = {}) {
 test('SDK loads before inline code; save begins disabled', () => {
   assert.ok(html.indexOf('src="/api/plugin/page/bridge-sdk.js"') < html.indexOf('<script>'));
   assert.match(html, /id="save"[^>]*disabled/);
+  assert.match(html, /href="\.\/smart-core\.css"/);
+  assert.match(css, /grid-template-columns:\s*156px minmax\(0, 1fr\)/);
+});
+
+test('navigation and dashboard summary use existing elements', async () => {
+  assert.doesNotMatch(script, /getElementById\(['"]title['"]\)/);
+  const p = page();
+  await tick();
+  assert.equal(p.elements.get('core_status').textContent, '运行中');
+  assert.equal(p.elements.get('group_count').textContent, '0');
+  assert.equal(p.elements.get('provider_count').textContent, '2');
+  assert.equal(p.elements.get('groups_status').textContent, '0 个群');
 });
 
 test('waits for bridge context before loading or permitting saves', async () => {
