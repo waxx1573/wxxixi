@@ -12,6 +12,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import tempfile
 import time
 import logging
@@ -22,6 +23,47 @@ import state
 import config
 
 log = logging.getLogger("ob11-bridge")
+
+
+_TABLE_SEPARATOR_RE = re.compile(
+    r"^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$"
+)
+
+
+def _format_text_for_wechat(text):
+    """Convert common Markdown into readable WeChat plain text."""
+    if not isinstance(text, str) or not text:
+        return text
+
+    value = text.replace("\r\n", "\n").replace("\r", "\n")
+    value = re.sub(r"```[^\n]*\n?", "", value)
+    value = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\1（\2）", value)
+    value = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1（\2）", value)
+
+    lines = []
+    for line in value.split("\n"):
+        if _TABLE_SEPARATOR_RE.match(line):
+            continue
+        heading = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
+        if heading:
+            line = f"【{heading.group(1)}】"
+        else:
+            line = re.sub(r"^(\s*)>+\s?", r"\1引用：", line)
+            line = re.sub(r"^(\s*)[-+*]\s+", r"\1• ", line)
+            if line.strip().startswith("|") and line.strip().endswith("|"):
+                cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+                line = "｜".join(cells)
+        lines.append(line.rstrip())
+
+    value = "\n".join(lines)
+    value = re.sub(r"`([^`\n]+)`", r"\1", value)
+    value = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", value)
+    value = re.sub(r"__([^_\n]+)__", r"\1", value)
+    value = re.sub(r"~~([^~\n]+)~~", r"\1", value)
+    value = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", value)
+    value = re.sub(r"(?<!_)_([^_\n]+)_(?!_)", r"\1", value)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value
 
 
 def _verify_text_delivery(contact, text, since):
@@ -112,7 +154,7 @@ async def _handle_ob_api(data: dict):
             seg_data = seg.get("data", {})
 
             if seg_type == "text":
-                text = seg_data.get("text", "")
+                text = _format_text_for_wechat(seg_data.get("text", ""))
                 if text:
                     bridge = state.bridge_instance
                     if bridge:

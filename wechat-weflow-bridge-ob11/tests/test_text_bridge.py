@@ -99,6 +99,41 @@ class TextBridgeTests(unittest.TestCase):
         state.sender_instance.send_text.assert_called_once_with('TestGroup', 'hello')
         self.assertIsNone(self.event())
 
+    def test_wechat_formatter_removes_markdown_decoration(self):
+        source = (
+            '# Summary\n\n'
+            'I **do not** have *independent* awareness.\n'
+            '- first\n- second\n'
+            '> quoted\n'
+            '[docs](https://example.com) and `code`\n\n\n'
+            '| Name | Value |\n| --- | ---: |\n| A | 1 |'
+        )
+        self.assertEqual(
+            ob_protocol._format_text_for_wechat(source),
+            '【Summary】\n\nI do not have independent awareness.\n'
+            '• first\n• second\n引用：quoted\n'
+            'docs（https://example.com） and code\n\nName｜Value\nA｜1',
+        )
+
+    def test_wechat_formatter_preserves_plain_text(self):
+        text = '你好！\n普通文本 123，标点保持不变。'
+        self.assertEqual(ob_protocol._format_text_for_wechat(text), text)
+
+    def test_group_send_formats_before_cache_send_and_readback(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state._ob_id_to_contact[456] = 'TestGroup'
+        state.sender_instance = Mock()
+        state.sender_instance.send_text.return_value = True
+        state.bridge_instance = self.bridge
+        with patch.object(ob_protocol, '_verify_text_delivery', return_value=True) as verify:
+            asyncio.run(ob_protocol._handle_ob_api(dict(action='send_msg', echo='test', params={
+                'group_id':'456', 'message':[{'type':'text','data':{'text':'我**没有**自主意识'}}]})))
+        state.sender_instance.send_text.assert_called_once_with('TestGroup', '我没有自主意识')
+        verify.assert_called_once()
+        self.assertEqual(verify.call_args.args[1], '我没有自主意识')
+        self.assertIn('我没有自主意识', self.bridge._sent_recently)
+        self.assertNotIn('我**没有**自主意识', self.bridge._sent_recently)
+
     def test_verified_group_send_responds_after_delivery_readback(self):
         state._ob_ws = types.SimpleNamespace(send=AsyncMock())
         state._ob_id_to_contact[456] = 'TestGroup'
