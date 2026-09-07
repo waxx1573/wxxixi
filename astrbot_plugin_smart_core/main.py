@@ -101,6 +101,20 @@ class Main(star.Star):
             logger.warning("Smart Core prompt unavailable: %s (%s)", name, type(exc).__name__)
             return ""
 
+    def _persona_prompt(self, persona_id: str, fallback: str = "") -> str:
+        """Read the current native Persona so dashboard edits affect runtime requests."""
+        manager = getattr(self.context, "persona_manager", None)
+        getter = getattr(manager, "get_persona_v3_by_id", None)
+        if callable(getter):
+            try:
+                persona = getter(persona_id)
+                prompt = persona.get("prompt", "") if isinstance(persona, dict) else getattr(persona, "prompt", "")
+                if isinstance(prompt, str) and prompt.strip():
+                    return prompt.strip()
+            except Exception as exc:
+                logger.debug("Smart Core native persona unavailable: %s", type(exc).__name__)
+        return fallback.strip()
+
     @staticmethod
     def _message_text(event: AstrMessageEvent) -> str:
         getter = getattr(event, "get_message_str", None)
@@ -159,7 +173,8 @@ class Main(star.Star):
             logger.info("Smart Core: direct mention bypassed decision model")
             return True
         try:
-            if not self._decision_prompt:
+            decision_prompt = self._persona_prompt("Smart-WeChat-Decision-v1", self._decision_prompt)
+            if not decision_prompt:
                 raise RuntimeError("decision prompt is unavailable")
             provider_id = str(settings.get("decision_provider_id", "")).strip()
             provider = self.context.get_provider_by_id(provider_id) if provider_id else None
@@ -177,7 +192,7 @@ class Main(star.Star):
                     f"近期群聊上下文：\n{context or '无可靠上下文'}\n\n"
                     f"当前微信群消息：\n{text}\n\n只输出 skip 或 casual。"
                 ),
-                system_prompt=self._decision_prompt,
+                system_prompt=decision_prompt,
             )
             if getattr(result, "role", None) == "err":
                 raise RuntimeError("decision provider returned an error response")
@@ -552,7 +567,8 @@ class Main(star.Star):
                 logger.info("Smart Core: unmanaged or disabled group stopped (%s)", group_id)
                 event.stop_event()
                 return
-            if not self._casual_prompt:
+            casual_prompt = self._persona_prompt("Smart-WeChat-Casual-v1", self._casual_prompt)
+            if not casual_prompt:
                 logger.warning("Smart Core: casual prompt unavailable, request stopped")
                 event.stop_event()
                 return
@@ -578,9 +594,10 @@ class Main(star.Star):
             return
 
         current_prompt = req.system_prompt or ""
+        runtime_casual_prompt = self._persona_prompt("Smart-WeChat-Casual-v1", self._casual_prompt)
         casual_prompt = ""
-        if group_id and self._casual_prompt and self._casual_prompt not in current_prompt:
-            casual_prompt = self._casual_prompt + "\n\n"
+        if group_id and runtime_casual_prompt and runtime_casual_prompt not in current_prompt:
+            casual_prompt = runtime_casual_prompt + "\n\n"
         req.system_prompt = (
             casual_prompt
             + ("你是 Smart 风格的群聊助手。群聊回复要简洁自然。\n" if group_id else "")
