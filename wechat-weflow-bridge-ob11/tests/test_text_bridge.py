@@ -99,6 +99,19 @@ class TextBridgeTests(unittest.TestCase):
         state.sender_instance.send_text.assert_called_once_with('TestGroup', 'hello')
         self.assertIsNone(self.event())
 
+    def test_adjacent_text_segments_merge_without_crossing_media(self):
+        message = [
+            {'type': 'text', 'data': {'text': '第一段'}},
+            {'type': 'text', 'data': {'text': '第二段'}},
+            {'type': 'image', 'data': {'file': 'x.png'}},
+            {'type': 'text', 'data': {'text': '第三段'}},
+        ]
+        self.assertEqual(ob_protocol._merge_adjacent_text_segments(message), [
+            {'type': 'text', 'data': {'text': '第一段第二段'}},
+            {'type': 'image', 'data': {'file': 'x.png'}},
+            {'type': 'text', 'data': {'text': '第三段'}},
+        ])
+
     def test_wechat_formatter_removes_markdown_decoration(self):
         source = (
             '# Summary\n\n'

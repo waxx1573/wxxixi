@@ -171,6 +171,21 @@ def _verify_text_delivery(contact, text, since):
     return False
 
 
+def _merge_adjacent_text_segments(message):
+    """Merge adjacent text segments into one logical outbound message."""
+    normalized = []
+    for seg in message if isinstance(message, list) else []:
+        if isinstance(seg, dict) and seg.get("type") == "text":
+            text_value = str(seg.get("data", {}).get("text", "") or "")
+            if normalized and normalized[-1].get("type") == "text":
+                normalized[-1]["data"]["text"] += text_value
+            else:
+                normalized.append({"type": "text", "data": {"text": text_value}})
+        else:
+            normalized.append(seg)
+    return normalized
+
+
 async def _handle_ob_api(data: dict):
     """处理 AstrBot 发来的 API 请求。"""
     action = data.get("action", "")
@@ -227,8 +242,8 @@ async def _handle_ob_api(data: dict):
         message = params.get("message", [])
         contact = state._ob_id_to_contact.get(target_id, str(target_id))
 
-        # 逐段处理：文字和图片分别发送
-        for seg in message:
+        # 逐段处理：文字和图片分别发送；相邻文字已合并为一条消息
+        for seg in _merge_adjacent_text_segments(message):
             if not isinstance(seg, dict):
                 continue
             seg_type = seg.get("type", "")
