@@ -48,6 +48,13 @@ class SmartFallbackProvider(ProviderOpenAIOfficial):
 class Main(star.Star):
     """Smart-style policy layer. AI generation remains AstrBot's responsibility."""
 
+    SMART_PERSONAS = {
+        "Smart-WeChat-Casual-v1": "casual",
+        "Smart-WeChat-Decision-v1": "decision",
+        "Smart-WeChat-Moderation-v1": "moderation",
+        "Smart-WeChat-ManageIntent-v1": "manage_intent",
+    }
+
     def __init__(self, context: star.Context, config=None):
         super().__init__(context, config or {})
         global _context
@@ -78,21 +85,28 @@ class Main(star.Star):
 
     async def initialize(self):
         manager = self.context.persona_manager
+        for persona in await manager.get_all_personas():
+            if persona.persona_id in self.SMART_PERSONAS:
+                continue
+            await manager.delete_persona(persona.persona_id)
+            logger.warning("Smart Core: removed non-Smart persona %s", persona.persona_id)
         existing = {item.persona_id for item in await manager.get_all_personas()}
-        for name, filename in (
-            ("Casual", "casual"), ("Decision", "decision"),
-            ("Moderation", "moderation"), ("ManageIntent", "manage_intent"),
-        ):
-            persona_id = f"Smart-WeChat-{name}-v1"
+        for persona_id, filename in self.SMART_PERSONAS.items():
             if persona_id in existing:
                 continue
             prompt = self._read_prompt(filename)
             await manager.create_persona(
                 persona_id=persona_id, system_prompt=prompt,
-                tools=None if name == "Casual" else [],
-                skills=None if name == "Casual" else [],
+                tools=None if filename == "casual" else [],
+                skills=None if filename == "casual" else [],
             )
             logger.info("Smart Core: registered native persona %s", persona_id)
+        try:
+            root = json.loads(self._astrbot_config_path.read_text(encoding="utf-8-sig"))
+            root.setdefault("provider_settings", {})["default_personality"] = "Smart-WeChat-Casual-v1"
+            self._astrbot_config_path.write_text(json.dumps(root, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("Smart Core default persona update failed: %s", type(exc).__name__)
 
     def _read_prompt(self, name: str) -> str:
         try:
