@@ -26,6 +26,9 @@ from uia_sender import UiaSender
 class TextBridgeTests(unittest.TestCase):
     def setUp(self):
         logging.disable(logging.CRITICAL)
+        ob_protocol._GROUP_TEXT_COALESCE_SECONDS = 0
+        ob_protocol._group_text_pending.clear()
+        ob_protocol._group_text_tasks.clear()
         state._self_id_int = 123
         state.group_reply_mode = 'all'
         state._ob_id_to_contact.clear()
@@ -38,6 +41,8 @@ class TextBridgeTests(unittest.TestCase):
         logging.disable(logging.NOTSET)
         state.bridge_instance = None
         state._ob_ws = None
+        ob_protocol._group_text_pending.clear()
+        ob_protocol._group_text_tasks.clear()
 
     def event(self, mode='all', data=None):
         state.group_reply_mode = mode
@@ -94,8 +99,11 @@ class TextBridgeTests(unittest.TestCase):
         state.sender_instance.send_text.return_value = True
         state.bridge_instance = self.bridge
         with patch.object(ob_protocol, '_verify_text_delivery', return_value=True):
-            asyncio.run(ob_protocol._handle_ob_api(dict(action='send_msg', echo='test', params={
-                'group_id':'456', 'message':[{'type':'text','data':{'text':'hello'}}]})))
+            async def invoke():
+                await ob_protocol._handle_ob_api(dict(action='send_msg', echo='test', params={
+                    'group_id':'456', 'message':[{'type':'text','data':{'text':'hello'}}]}))
+                await ob_protocol._group_text_tasks['TestGroup']
+            asyncio.run(invoke())
         state.sender_instance.send_text.assert_called_once_with('TestGroup', 'hello')
         self.assertIsNone(self.event())
 
@@ -154,13 +162,31 @@ class TextBridgeTests(unittest.TestCase):
         state.sender_instance.send_text.return_value = True
         state.bridge_instance = self.bridge
         with patch.object(ob_protocol, '_verify_text_delivery', return_value=True) as verify:
-            asyncio.run(ob_protocol._handle_ob_api(dict(action='send_msg', echo='test', params={
-                'group_id':'456', 'message':[{'type':'text','data':{'text':'我**没有**自主意识'}}]})))
+            async def invoke():
+                await ob_protocol._handle_ob_api(dict(action='send_msg', echo='test', params={
+                    'group_id':'456', 'message':[{'type':'text','data':{'text':'我**没有**自主意识'}}]}))
+                await ob_protocol._group_text_tasks['TestGroup']
+            asyncio.run(invoke())
         state.sender_instance.send_text.assert_called_once_with('TestGroup', '我没有自主意识')
         verify.assert_called_once()
         self.assertEqual(verify.call_args.args[1], '我没有自主意识')
         self.assertIn('我没有自主意识', self.bridge._sent_recently)
         self.assertNotIn('我**没有**自主意识', self.bridge._sent_recently)
+
+    def test_independent_group_text_calls_coalesce_into_one_bubble(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state._ob_id_to_contact[456] = 'TestGroup'
+        state.sender_instance = Mock()
+        state.sender_instance.send_text.return_value = True
+        state.bridge_instance = self.bridge
+        with patch.object(ob_protocol, '_verify_text_delivery', return_value=True):
+            async def invoke():
+                for text in ('第一段', '第二段', '第三段'):
+                    await ob_protocol._handle_ob_api(dict(action='send_group_msg', params={
+                        'group_id': '456', 'message': [{'type': 'text', 'data': {'text': text}}]}))
+                await ob_protocol._group_text_tasks['TestGroup']
+            asyncio.run(invoke())
+        state.sender_instance.send_text.assert_called_once_with('TestGroup', '第一段\n第二段\n第三段')
 
     def test_verified_group_send_responds_after_delivery_readback(self):
         state._ob_ws = types.SimpleNamespace(send=AsyncMock())

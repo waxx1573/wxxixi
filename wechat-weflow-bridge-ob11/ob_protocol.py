@@ -26,6 +26,11 @@ import config
 log = logging.getLogger("ob11-bridge")
 
 
+_GROUP_TEXT_COALESCE_SECONDS = 15.0
+_group_text_pending = {}
+_group_text_tasks = {}
+
+
 _MARKDOWN_PARSER = MarkdownIt("commonmark", {"html": False}).enable(
     ["table", "strikethrough"]
 )
@@ -186,6 +191,67 @@ def _merge_adjacent_text_segments(message):
     return normalized
 
 
+async def _send_formatted_text(contact, text):
+    """Send formatted text with UIA retry and WeFlow readback."""
+    bridge = state.bridge_instance
+    if bridge:
+        now = time.time()
+        bridge._sent_recently = {
+            value: stamp for value, stamp in bridge._sent_recently.items()
+            if now - stamp < 120
+        }
+        bridge._sent_recently[text] = now
+
+    sent = False
+    delivery_error = ""
+    for attempt in range(4):
+        send_started = time.time()
+        try:
+            sent = await asyncio.to_thread(state.sender_instance.send_text, contact, text)
+            if sent:
+                sent = await asyncio.to_thread(_verify_text_delivery, contact, text, send_started)
+        except Exception as exc:
+            sent = False
+            delivery_error = f"微信文字发送异常: {type(exc).__name__}"
+            log.error("[OB11] 文字发送异常: %s (%s)", contact, type(exc).__name__)
+        if sent:
+            break
+        retryable = bool(getattr(state.sender_instance, "last_failure_retryable", False))
+        if attempt < 3 and retryable:
+            log.warning("[OB11] 发送在输入前被打断，等待键鼠空闲后重试 (%d/3): %s", attempt + 1, contact)
+            idle = await asyncio.to_thread(state.sender_instance.wait_until_user_idle, 5.0, 90.0)
+            if not idle:
+                delivery_error = f"等待桌面空闲超时: {contact}"
+                log.error("[OB11] 等待桌面空闲超时，停止重试: %s", contact)
+                break
+            continue
+        break
+
+    if sent:
+        log.info("[OB11] 微信回读确认文字已发送: %s", contact)
+    else:
+        if bridge:
+            bridge._sent_recently.pop(text, None)
+        log.error("[OB11] 文字发送失败: %s%s", contact, f" ({delivery_error})" if delivery_error else "")
+    return sent
+
+
+async def _flush_group_text(contact):
+    await asyncio.sleep(_GROUP_TEXT_COALESCE_SECONDS)
+    texts = _group_text_pending.pop(contact, [])
+    _group_text_tasks.pop(contact, None)
+    text = "\n".join(item for item in texts if item)
+    if text:
+        log.info("[OB11] 合并普通群文字出站: %s (%d 段)", contact, len(texts))
+        await _send_formatted_text(contact, text)
+
+
+async def _queue_group_text(contact, text):
+    _group_text_pending.setdefault(contact, []).append(text)
+    if contact not in _group_text_tasks:
+        _group_text_tasks[contact] = asyncio.create_task(_flush_group_text(contact))
+
+
 async def _handle_ob_api(data: dict):
     """处理 AstrBot 发来的 API 请求。"""
     action = data.get("action", "")
@@ -241,6 +307,24 @@ async def _handle_ob_api(data: dict):
             pass
         message = params.get("message", [])
         contact = state._ob_id_to_contact.get(target_id, str(target_id))
+
+        # AstrBot can emit one logical group answer as several independent
+        # normal send_group_msg calls. Coalesce text-only calls into one
+        # WeChat bubble; verified actions and media keep their old semantics.
+        if not verified_send and is_group:
+            normalized = _merge_adjacent_text_segments(message)
+            if normalized and all(
+                isinstance(seg, dict) and seg.get("type") == "text"
+                for seg in normalized
+            ):
+                texts = [
+                    _format_text_for_wechat(seg.get("data", {}).get("text", ""))
+                    for seg in normalized
+                ]
+                texts = [text for text in texts if text]
+                if texts:
+                    await _queue_group_text(contact, "\n".join(texts))
+                message = []
 
         # 逐段处理：文字和图片分别发送；相邻文字已合并为一条消息
         for seg in _merge_adjacent_text_segments(message):
