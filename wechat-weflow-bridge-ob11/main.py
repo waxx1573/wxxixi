@@ -155,10 +155,15 @@ if __name__ == "__main__":
         try:
             import ctypes
             from ctypes import wintypes
-            h = ctypes.windll.kernel32.OpenProcess(0x0400, False, pid)
+            h = ctypes.windll.kernel32.OpenProcess(0x1000, False, pid)
             if h:
-                ctypes.windll.kernel32.CloseHandle(h)
-                return True
+                try:
+                    exit_code = wintypes.DWORD()
+                    if not ctypes.windll.kernel32.GetExitCodeProcess(h, ctypes.byref(exit_code)):
+                        return True
+                    return exit_code.value == 259  # STILL_ACTIVE
+                finally:
+                    ctypes.windll.kernel32.CloseHandle(h)
             return False
         except Exception:
             return True
