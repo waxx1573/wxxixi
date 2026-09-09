@@ -306,6 +306,10 @@ async def _handle_ob_api(data: dict):
         except (TypeError, ValueError):
             pass
         message = params.get("message", [])
+        source_ids = [str(seg.get("data", {}).get("id", ""))
+                      for seg in message if isinstance(seg, dict) and seg.get("type") == "reply"]
+        log.info("[OB11] 出站关联: target_id=%s source_message_ids=%s echo=%s",
+                 target_id, source_ids, echo)
         contact = state._ob_id_to_contact.get(target_id, str(target_id))
 
         # AstrBot can emit one logical group answer as several independent

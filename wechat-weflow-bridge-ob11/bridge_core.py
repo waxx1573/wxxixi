@@ -271,6 +271,8 @@ class WeFlowBridge:
         else:
             state._ob_id_to_contact[user_id] = contact
 
+        log.info("[OB11] 入站关联: message_id=%s group_id=%s",
+                 event.get("message_id"), event.get("group_id"))
         sent = push_event(event)
         if sent > 0:
             log.info(f"✅ 已推送至 {sent} 个 AstrBot 客户端 [{contact}]")
