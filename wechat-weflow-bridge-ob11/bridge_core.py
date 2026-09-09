@@ -279,7 +279,21 @@ class WeFlowBridge:
 
         with self.buffer_lock:
             if sender_id in self.pending_buffers:
-                self.pending_buffers[sender_id]["processing"] = False
+                pending = self.pending_buffers[sender_id]
+                pending["processing"] = False
+                # New arrivals during push/reconnect need their own timer.
+                if pending["messages"] or pending.get("segments"):
+                    if pending.get("timer"):
+                        pending["timer"].cancel()
+                    pending["timer_version"] = pending.get("timer_version", 0) + 1
+                    next_version = pending["timer_version"]
+                    timer = threading.Timer(
+                        config.BUFFER_SECONDS,
+                        lambda sid=sender_id, v=next_version: self.process_sender(sid, v),
+                    )
+                    timer.daemon = True
+                    pending["timer"] = timer
+                    timer.start()
 
     def listen_sse(self):
         """连接 WeFlow SSE 推送。"""

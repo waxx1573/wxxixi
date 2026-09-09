@@ -52,6 +52,26 @@ class TextBridgeTests(unittest.TestCase):
                 self.bridge.process_sender(key)
             return push.call_args.args[0] if push.called else None
 
+    def test_message_arriving_during_push_is_scheduled_without_third_message(self):
+        events = []
+        def push(event):
+            events.append(event)
+            if len(events) == 1:
+                self.bridge.add_to_buffer(dict(self.data, content='follow up'))
+            return True
+        with patch.object(bridge_core.threading, 'Timer') as timer, \
+             patch.object(self.bridge, 'resolve_group_contact', return_value='TestGroup', create=True), \
+             patch.object(bridge_core, 'push_event', side_effect=push):
+            self.bridge.add_to_buffer(self.data)
+            key = next(iter(self.bridge.pending_buffers))
+            self.bridge.process_sender(key)
+            self.assertEqual(timer.call_count, 2)
+            callback = timer.call_args.args[1]
+            callback()
+            self.assertEqual(len(events), 2)
+            self.assertIn('follow up', events[1]['raw_message'])
+            self.assertEqual(timer.call_count, 2)
+
     def test_all_and_batch_wake_astrbot(self):
         for mode in ('all', 'batch'):
             with self.subTest(mode=mode):
