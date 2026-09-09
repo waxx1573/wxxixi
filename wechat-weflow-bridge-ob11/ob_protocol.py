@@ -306,6 +306,9 @@ async def _handle_ob_api(data: dict):
         except (TypeError, ValueError):
             pass
         message = params.get("message", [])
+        if verified_send and any(not isinstance(seg, dict) or seg.get("type") not in ("text", "at", "reply") for seg in message):
+            await respond("failed", 1200, {"delivery": "failed", "error": "当前送达验证仅支持文字；媒体请求未执行"})
+            return
         source_ids = [str(seg.get("data", {}).get("id", ""))
                       for seg in message if isinstance(seg, dict) and seg.get("type") == "reply"]
         log.info("[OB11] 出站关联: target_id=%s source_message_ids=%s echo=%s",
@@ -392,9 +395,11 @@ async def _handle_ob_api(data: dict):
             elif seg_type == "image":
                 file_val = seg_data.get("file", "")
                 if not file_val:
+                    log.error("[OB11] 图片发送失败：缺少文件: %s", contact)
                     continue
 
                 img_path = None
+                owns_temp_image = file_val.startswith("base64://")
 
                 # AstrBot 通过 aiocqhttp 发图片时用 base64:// 格式
                 if file_val.startswith("base64://"):
@@ -422,16 +427,21 @@ async def _handle_ob_api(data: dict):
 
                 if img_path:
                     try:
-                        # 使用线程池执行同步的 UIA 发送，避免阻塞事件循环
-                        await asyncio.to_thread(state.sender_instance.send_image, contact, img_path)
-                        log.info(f"[OB11] 图片已发送至 {contact}")
+                        submitted = await asyncio.to_thread(state.sender_instance.send_image, contact, img_path)
+                        if submitted:
+                            log.info("[OB11] 图片按键提交完成，尚未验证送达: %s", contact)
+                        else:
+                            log.error("[OB11] 图片发送器返回失败: %s", contact)
+                    except Exception as exc:
+                        log.error("[OB11] 图片发送异常: %s (%s)", contact, type(exc).__name__)
                     finally:
-                        # 临时文件用完删除
-                        if img_path and "tmp" in img_path:
+                        if owns_temp_image:
                             try:
                                 os.unlink(img_path)
-                            except Exception:
+                            except OSError:
                                 pass
+                else:
+                    log.error("[OB11] 图片发送失败：文件不可用或解码失败: %s", contact)
 
             elif seg_type == "face":
                 await asyncio.to_thread(state.sender_instance.send_text, contact, "[表情]")

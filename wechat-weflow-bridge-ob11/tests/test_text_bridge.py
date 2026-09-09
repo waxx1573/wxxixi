@@ -208,6 +208,46 @@ class TextBridgeTests(unittest.TestCase):
             asyncio.run(invoke())
         state.sender_instance.send_text.assert_called_once_with('TestGroup', '第一段\n第二段\n第三段')
 
+    def test_image_sender_false_is_logged_as_failure(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state.sender_instance = Mock()
+        state.sender_instance.send_image.return_value = False
+        with patch.object(ob_protocol, '_decode_base64_image', return_value='image.png'), patch.object(ob_protocol, 'log') as log:
+            asyncio.run(ob_protocol._handle_ob_api(dict(action='send_private_msg', echo=1,
+                params={'user_id':123, 'message':[{'type':'image','data':{'file':'base64://test'}}]})))
+        self.assertTrue(log.error.called)
+        self.assertFalse(any('图片已发送' in str(c) for c in log.info.call_args_list))
+
+    def test_image_exception_does_not_drop_following_text(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state.sender_instance = Mock(last_failure_retryable=False)
+        state.sender_instance.send_image.side_effect = RuntimeError('failed')
+        with patch.object(ob_protocol, '_decode_base64_image', return_value='image.png'), patch.object(ob_protocol, '_verify_text_delivery', return_value=True):
+            asyncio.run(ob_protocol._handle_ob_api(dict(action='send_private_msg', echo=1,
+                params={'user_id':123, 'message':[{'type':'image','data':{'file':'base64://test'}}, {'type':'text','data':{'text':'caption'}}]})))
+        state.sender_instance.send_text.assert_called_once_with('123','caption')
+
+    def test_missing_image_is_failure_and_success_is_only_submission(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state.sender_instance = Mock()
+        with patch.object(ob_protocol, 'log') as log:
+            asyncio.run(ob_protocol._handle_ob_api(dict(action='send_private_msg', echo=1,
+                params={'user_id':123, 'message':[{'type':'image','data':{}}]})))
+            self.assertTrue(log.error.called)
+        with patch.object(ob_protocol, '_decode_base64_image', return_value='image.png'), patch.object(ob_protocol, 'log') as log:
+            asyncio.run(ob_protocol._handle_ob_api(dict(action='send_private_msg', echo=2,
+                params={'user_id':123, 'message':[{'type':'image','data':{'file':'base64://test'}}]})))
+            self.assertFalse(any('图片已发送' in str(c) for c in log.info.call_args_list))
+
+    def test_verified_images_are_rejected_before_sending(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state.sender_instance = Mock()
+        asyncio.run(ob_protocol._handle_ob_api(dict(action='send_group_msg_verified',echo='media',
+            params={'group_id':123,'message':[{'type':'image','data':{'file':'base64://test'}}]})))
+        response=__import__('json').loads(state._ob_ws.send.await_args.args[0])
+        self.assertEqual(response['status'],'failed')
+        state.sender_instance.send_image.assert_not_called()
+
     def test_distinct_images_are_not_deduplicated_as_placeholder(self):
         state._outbound_dedupe = {}
         state._ob_ws = types.SimpleNamespace(send=AsyncMock())
