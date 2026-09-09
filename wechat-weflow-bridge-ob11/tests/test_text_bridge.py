@@ -208,6 +208,43 @@ class TextBridgeTests(unittest.TestCase):
             asyncio.run(invoke())
         state.sender_instance.send_text.assert_called_once_with('TestGroup', '第一段\n第二段\n第三段')
 
+    def test_distinct_images_are_not_deduplicated_as_placeholder(self):
+        state._outbound_dedupe = {}
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state.sender_instance = Mock()
+        with patch.object(ob_protocol, '_decode_base64_image', side_effect=['image-a.png', 'image-b.png']):
+            async def run():
+                for i in (1, 2):
+                    await ob_protocol._handle_ob_api(dict(action='send_private_msg', echo=i,
+                        params={'user_id': 123, 'message': [{'type': 'image', 'data': {'file': 'base64://' + str(i)}}]}))
+            asyncio.run(run())
+        self.assertEqual(state.sender_instance.send_image.call_count, 2)
+
+    def test_distinct_text_requests_can_have_identical_bodies(self):
+        state._outbound_dedupe = {}
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state.sender_instance = Mock(last_failure_retryable=False)
+        with patch.object(ob_protocol, '_verify_text_delivery', return_value=True):
+            async def run():
+                for i in (1, 2):
+                    await ob_protocol._handle_ob_api(dict(action='send_private_msg', echo=i,
+                        params={'user_id': 123, 'message': [{'type': 'text', 'data': {'text': 'ack'}}]}))
+            asyncio.run(run())
+        self.assertEqual(state.sender_instance.send_text.call_count, 2)
+
+    def test_unsent_text_does_not_suppress_a_later_request(self):
+        state._outbound_dedupe = {}
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state.sender_instance = Mock(last_failure_retryable=False)
+        state.sender_instance.send_text.side_effect = [False, True]
+        with patch.object(ob_protocol, '_verify_text_delivery', return_value=True):
+            async def run():
+                for i in (1, 2):
+                    await ob_protocol._handle_ob_api(dict(action='send_private_msg', echo=i,
+                        params={'user_id': 123, 'message': [{'type': 'text', 'data': {'text': 'ack'}}]}))
+            asyncio.run(run())
+        self.assertEqual(state.sender_instance.send_text.call_count, 2)
+
     def test_verified_group_send_responds_after_delivery_readback(self):
         state._ob_ws = types.SimpleNamespace(send=AsyncMock())
         state._ob_id_to_contact[456] = 'TestGroup'
