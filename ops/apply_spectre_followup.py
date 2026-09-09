@@ -39,7 +39,7 @@ if 'from .utils.spectre_followup import followup_window' not in changes[p]:
     changes[p] = 'from .utils.spectre_followup import followup_window\n' + changes[p]
 replace(root / "utils/llm_utils.py",
         '        # 将环境描述追加到 system_prompt',
-        '        env_description += "\\n接话规则：先核对最近记录里的发言人和最后一轮机器人回复。若当前成员正在回答你刚才的问题、补充地点/条件或纠正你的理解，直接承接并简短确认，不要求再次点名。只用本群事实；不得把别人的话当成当前成员的经历。成员彼此聊天且与你无关时保持安静。对于记住类请求，先承接当前对话，未实际写入记忆不得声称永久记住。"\n\n'
+        '        env_description += "\\n接话规则：先核对最近记录里的发言人和最后一轮机器人回复。若当前成员正在回答你刚才的问题、补充地点/条件或纠正你的理解，直接承接并简短确认，不要求再次点名。只用本群事实；不得把别人的话当成当前成员的经历。成员彼此聊天且与你无关时保持安静。对于记住类请求，先承接当前对话，未实际写入记忆不得声称永久记住。天气预报、价格、库存等实时事实必须依据可用工具的本次查询结果，说明地点和日期；没有查询依据时明确尚未查到，不编造精确预报或声称已查询。历史Bot回复不是真实数据源，收到纠正先承认并核对，不重复断言、不反问责怪用户。"\n\n'
         '        # 将环境描述追加到 system_prompt')
 changes[root / "utils/spectre_followup.py"] = helper
 for path, text in changes.items():
