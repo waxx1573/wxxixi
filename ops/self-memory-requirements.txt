@@ -1,0 +1,3 @@
+mem0ai==1.0.11
+qdrant-client==1.19.0
+protobuf==6.33.6
