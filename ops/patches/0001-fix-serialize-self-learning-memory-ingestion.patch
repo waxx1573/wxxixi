@@ -1,0 +1,866 @@
+From c144632eb98675d65abb7ae3699c448c559ec4ba Mon Sep 17 00:00:00 2001
+From: waxx <91535312+waxx1573@users.noreply.github.com>
+Date: Thu, 10 Sep 2026 22:21:40 +0800
+Subject: [PATCH] fix: serialize self-learning memory ingestion
+
+---
+ core/framework_llm_adapter.py                 |  46 ++++--
+ metadata.yaml                                 |   2 +-
+ .../core_learning/v2_learning_integration.py  | 131 +++++++++++++----
+ services/hooks/llm_hook_handler.py            |  26 +++-
+ services/integration/mem0_memory_manager.py   |  16 +-
+ tests/unit/test_background_request_gate.py    |  61 ++++++++
+ tests/unit/test_framework_llm_adapter.py      |  80 ++++++++++
+ tests/unit/test_v2_ingestion_retry.py         | 137 ++++++++++++++++++
+ utils/background_request_gate.py              |  90 ++++++++++++
+ 9 files changed, 540 insertions(+), 49 deletions(-)
+ create mode 100644 tests/unit/test_background_request_gate.py
+ create mode 100644 tests/unit/test_v2_ingestion_retry.py
+ create mode 100644 utils/background_request_gate.py
+
+diff --git a/core/framework_llm_adapter.py b/core/framework_llm_adapter.py
+index cdea234..e19bace 100644
+--- a/core/framework_llm_adapter.py
++++ b/core/framework_llm_adapter.py
+@@ -9,6 +9,10 @@ from typing import Optional, List, Dict, Any, Tuple
+ from astrbot.api import logger
+ from astrbot.core.provider.provider import Provider
+ from astrbot.core.provider.entities import LLMResponse
++try:
++    from ..utils.background_request_gate import queued_text_chat
++except ImportError:
++    from utils.background_request_gate import queued_text_chat
+ 
+ class FrameworkLLMAdapter:
+     """AstrBot框架LLM适配器，用于替换自定义LLMClient"""
+@@ -287,7 +291,8 @@ class FrameworkLLMAdapter:
+ 
+         logger.debug(f"调用{role_label}Provider: {provider.meta().id}")
+         try:
+-            return await provider.text_chat(
++            return await queued_text_chat(
++                provider,
+                 prompt=prompt,
+                 contexts=contexts,
+                 system_prompt=system_prompt,
+@@ -305,7 +310,8 @@ class FrameworkLLMAdapter:
+                 f"[LLM适配器] {role_label}Provider 已重新绑定: "
+                 f"{retry_provider.meta().id}"
+             )
+-            return await retry_provider.text_chat(
++            return await queued_text_chat(
++                retry_provider,
+                 prompt=prompt,
+                 contexts=contexts,
+                 system_prompt=system_prompt,
+@@ -370,10 +376,9 @@ class FrameworkLLMAdapter:
+                 **kwargs,
+             )
+             return response.completion_text if response else None
+-        except Exception as e:
++        except Exception:
+             self.call_stats['filter']['errors'] += 1
+-            logger.error(f"筛选模型调用失败: {e}")
+-            return None
++            raise
+         finally:
+             elapsed_time = time.time() - start_time
+             self.call_stats['filter']['total_time'] += elapsed_time
+@@ -383,6 +388,7 @@ class FrameworkLLMAdapter:
+         prompt: str,
+         contexts: Optional[List[Dict[str, str]]] = None,
+         system_prompt: Optional[str] = None,
++        raise_on_error: bool = False,
+         **kwargs
+     ) -> Optional[str]:
+         """使用筛选模型进行对话补全"""
+@@ -400,7 +406,8 @@ class FrameworkLLMAdapter:
+             if fallback_provider:
+                 logger.info(f"使用备选Provider: {fallback_provider.meta().id}")
+                 try:
+-                    response = await fallback_provider.text_chat(
++                    response = await queued_text_chat(
++                        fallback_provider,
+                         prompt=prompt,
+                         contexts=contexts,
+                         system_prompt=system_prompt,
+@@ -409,6 +416,8 @@ class FrameworkLLMAdapter:
+                     return response.completion_text if response else None
+                 except Exception as e:
+                     logger.error(f"备选Provider调用失败: {e}")
++                    if raise_on_error:
++                        raise
+                     return None
+             else:
+                 logger.error("没有可用的Provider，无法执行筛选任务")
+@@ -423,15 +432,28 @@ class FrameworkLLMAdapter:
+         inflight = self._filter_inflight.get(cache_key)
+         if inflight and not inflight.done():
+             logger.debug("筛选模型已有相同请求进行中，复用结果")
+-            return await inflight
++            try:
++                return await inflight
++            except Exception as e:
++                logger.error(f"筛选模型调用失败: {e}")
++                if raise_on_error:
++                    raise
++                return None
+ 
+         task = asyncio.create_task(
+             self._call_filter_provider(prompt, contexts, system_prompt, **kwargs)
+         )
+         self._filter_inflight[cache_key] = task
+         try:
+-            result = await task
+-            self._set_filter_cache(cache_key, result)
++            try:
++                result = await task
++            except Exception as e:
++                logger.error(f"筛选模型调用失败: {e}")
++                if raise_on_error:
++                    raise
++                return None
++            if result is not None:
++                self._set_filter_cache(cache_key, result)
+             return result
+         finally:
+             self._filter_inflight.pop(cache_key, None)
+@@ -458,7 +480,8 @@ class FrameworkLLMAdapter:
+             if fallback_provider:
+                 logger.info(f"使用备选Provider: {fallback_provider.meta().id}")
+                 try:
+-                    response = await fallback_provider.text_chat(
++                    response = await queued_text_chat(
++                        fallback_provider,
+                         prompt=prompt,
+                         contexts=contexts,
+                         system_prompt=system_prompt,
+@@ -521,7 +544,8 @@ class FrameworkLLMAdapter:
+             if fallback_provider:
+                 logger.info(f"使用备选Provider: {fallback_provider.meta().id}")
+                 try:
+-                    response = await fallback_provider.text_chat(
++                    response = await queued_text_chat(
++                        fallback_provider,
+                         prompt=prompt,
+                         contexts=contexts,
+                         system_prompt=system_prompt,
+diff --git a/metadata.yaml b/metadata.yaml
+index 1d321cd..7355be7 100644
+--- a/metadata.yaml
++++ b/metadata.yaml
+@@ -2,7 +2,7 @@ name: "astrbot_plugin_self_learning"
+ author: "NickMo, EterUltimate"
+ display_name: "self-learning"
+ description: "SELF LEARNING 自主学习插件 — 让 AI 聊天机器人自主学习对话风格、理解群组黑话、管理社交关系与好感度、自适应人格演化，像真人一样自然对话。(使用前必须手动备份人格数据)"
+-version: "4.2.0"
++version: "4.3.0"
+ repo: "https://github.com/NickCharlie/astrbot_plugin_self_learning"
+ tags:
+   - "自学习"
+diff --git a/services/core_learning/v2_learning_integration.py b/services/core_learning/v2_learning_integration.py
+index a04a6c5..1d482cc 100644
+--- a/services/core_learning/v2_learning_integration.py
++++ b/services/core_learning/v2_learning_integration.py
+@@ -52,6 +52,10 @@ _MIN_INGESTION_LENGTH = 15
+ # Maximum buffered messages per group before force-flushing.
+ _INGESTION_BUFFER_MAX = 10
+ 
++# Flush low-traffic groups even when no later message arrives to re-check the
++# tiered trigger's wall-clock policy.
++_INGESTION_FLUSH_INTERVAL_SECONDS = 60.0
++
+ 
+ class V2LearningIntegration:
+     """Facade that initialises, wires, and exposes v2 learning modules.
+@@ -107,6 +111,8 @@ class V2LearningIntegration:
+         # must not run per-message. Instead, messages are buffered here
+         # and flushed as a batch in a Tier 2 operation.
+         self._ingestion_buffer: Dict[str, List[MessageData]] = defaultdict(list)
++        self._ingestion_targets: Dict[int, set[str]] = {}
++        self._ingestion_flush_tasks: Dict[str, asyncio.Task] = {}
+ 
+         # --- Tiered trigger ------------------------------------------
+         self._trigger = TieredLearningTrigger()
+@@ -292,6 +298,14 @@ class V2LearningIntegration:
+         timeout. Timed-out buffers are discarded to avoid blocking
+         the shutdown sequence.
+         """
++        self._started = False
++        flush_tasks = list(self._ingestion_flush_tasks.values())
++        self._ingestion_flush_tasks.clear()
++        for task in flush_tasks:
++            task.cancel()
++        if flush_tasks:
++            await asyncio.gather(*flush_tasks, return_exceptions=True)
++
+         _flush_timeout = self._config.task_cancel_timeout
+ 
+         for group_id in list(self._ingestion_buffer.keys()):
+@@ -691,7 +705,15 @@ class V2LearningIntegration:
+                     message.message
+                     and len(message.message.strip()) >= _MIN_INGESTION_LENGTH
+                 ):
+-                    buf[group_id].append(message)
++                    targets = set()
++                    if self._knowledge_manager:
++                        targets.add("knowledge")
++                    if self._memory_manager and not self._memory_delegated():
++                        targets.add("memory")
++                    if targets:
++                        self._ingestion_targets[id(message)] = targets
++                        buf[group_id].append(message)
++                        self._schedule_ingestion_flush(group_id)
+ 
+             self._trigger.register_tier1("ingestion_buffer", _buffer_message)
+ 
+@@ -816,15 +838,44 @@ class V2LearningIntegration:
+                 ),
+             )
+ 
++    def _schedule_ingestion_flush(self, group_id: str) -> None:
++        """Ensure a low-traffic group gets a wall-clock ingestion flush."""
++        existing = self._ingestion_flush_tasks.get(group_id)
++        if existing and not existing.done():
++            return
++
++        async def _delayed_flush() -> None:
++            try:
++                await asyncio.sleep(_INGESTION_FLUSH_INTERVAL_SECONDS)
++                if self._ingestion_buffer.get(group_id):
++                    await self._trigger.force_tier2("ingestion_flush", group_id)
++            except asyncio.CancelledError:
++                raise
++            except Exception as exc:
++                logger.warning(
++                    f"[V2Integration] Scheduled ingestion flush failed for "
++                    f"group {group_id}: {exc}"
++                )
++            finally:
++                current = asyncio.current_task()
++                if self._ingestion_flush_tasks.get(group_id) is current:
++                    self._ingestion_flush_tasks.pop(group_id, None)
++                if self._started and self._ingestion_buffer.get(group_id):
++                    self._schedule_ingestion_flush(group_id)
++
++        self._ingestion_flush_tasks[group_id] = asyncio.create_task(
++            _delayed_flush(),
++            name=f"self-learning-ingestion-flush-{group_id}",
++        )
++
+     # Batch ingestion
+ 
+     async def _flush_ingestion_buffer(self, group_id: str) -> None:
+         """Flush buffered messages for a group through knowledge and memory.
+ 
+-        Processes all buffered messages concurrently through LightRAG and
+-        Mem0 in a single batch operation, then clears the buffer. Messages
+-        within each engine are processed sequentially to avoid overwhelming
+-        the underlying LLM providers with concurrent requests.
++        Each message tracks pending engines independently. Successful targets
++        are removed, while failed targets are requeued for the next trigger so
++        a transient Provider error cannot silently discard the message.
+         """
+         messages = self._ingestion_buffer.pop(group_id, [])
+         if not messages:
+@@ -835,51 +886,67 @@ class V2LearningIntegration:
+             f"group={group_id}, count={len(messages)}"
+         )
+ 
+-        async def _ingest_knowledge() -> None:
+-            if not self._knowledge_manager:
+-                return
+-            method = None
++        knowledge_method = None
++        if self._knowledge_manager:
+             if hasattr(
+                 self._knowledge_manager,
+                 "process_message_for_knowledge_graph",
+             ):
+-                method = self._knowledge_manager.process_message_for_knowledge_graph
++                knowledge_method = (
++                    self._knowledge_manager.process_message_for_knowledge_graph
++                )
+             elif hasattr(
+                 self._knowledge_manager, "process_message_for_knowledge"
+             ):
+-                method = self._knowledge_manager.process_message_for_knowledge
+-            if not method:
+-                return
+-            for msg in messages:
++                knowledge_method = self._knowledge_manager.process_message_for_knowledge
++
++        retry_messages: List[MessageData] = []
++        failed_targets = 0
++        for msg in messages:
++            targets = self._ingestion_targets.pop(id(msg), None)
++            if targets is None:
++                targets = set()
++                if knowledge_method:
++                    targets.add("knowledge")
++                if self._memory_manager and not self._memory_delegated():
++                    targets.add("memory")
++
++            remaining = set(targets)
++            if "knowledge" in targets and knowledge_method:
+                 try:
+-                    await method(msg, group_id)
++                    await knowledge_method(msg, group_id)
++                    remaining.discard("knowledge")
+                 except Exception as exc:
+-                    logger.debug(
+-                        f"[V2Integration] Knowledge ingestion failed: {exc}"
++                    logger.warning(
++                        f"[V2Integration] Knowledge ingestion failed; "
++                        f"message will retry: {exc}"
+                     )
+ 
+-        async def _ingest_memory() -> None:
+-            if self._memory_delegated():
+-                logger.debug("[V2Integration] Memory ingestion delegated to LivingMemory")
+-                return
+-            if not self._memory_manager:
+-                return
+-            for msg in messages:
++            if "memory" in targets and self._memory_manager:
+                 try:
+                     await self._memory_manager.add_memory_from_message(
+                         msg, group_id
+                     )
++                    remaining.discard("memory")
+                 except Exception as exc:
+-                    logger.debug(
+-                        f"[V2Integration] Memory ingestion failed: {exc}"
++                    logger.warning(
++                        f"[V2Integration] Memory ingestion failed; "
++                        f"message will retry: {exc}"
+                     )
+ 
+-        # Run knowledge and memory ingestion concurrently across engines,
+-        # but sequentially within each engine to avoid provider overload.
+-        await asyncio.gather(
+-            _ingest_knowledge(),
+-            _ingest_memory(),
+-        )
++            if remaining:
++                self._ingestion_targets[id(msg)] = remaining
++                retry_messages.append(msg)
++                failed_targets += len(remaining)
++
++        if retry_messages:
++            self._ingestion_buffer[group_id] = (
++                retry_messages + self._ingestion_buffer.get(group_id, [])
++            )
++            raise RuntimeError(
++                f"{failed_targets} ingestion target(s) failed; "
++                f"requeued {len(retry_messages)} message(s)"
++            )
+ 
+     def _memory_delegated(self) -> bool:
+         delegation = self._feature_delegation
+diff --git a/services/hooks/llm_hook_handler.py b/services/hooks/llm_hook_handler.py
+index c56c76c..d5af8b0 100644
+--- a/services/hooks/llm_hook_handler.py
++++ b/services/hooks/llm_hook_handler.py
+@@ -28,6 +28,10 @@ try:
+     from ...utils.persona_selection import get_event_persona_scope
+ except ImportError:
+     from utils.persona_selection import get_event_persona_scope
++try:
++    from ...utils.background_request_gate import note_foreground_request
++except ImportError:
++    from utils.background_request_gate import note_foreground_request
+ 
+ try:
+     from astrbot.core.agent.message import TextPart
+@@ -93,6 +97,7 @@ class LLMHookHandler:
+     @monitored
+     async def handle(self, event: AstrMessageEvent, req: Any) -> None:
+         """Process an LLM request hook — inject context into *req*."""
++        note_foreground_request()
+         hook_start = time.time()
+         social_ms = v2_ms = diversity_ms = jargon_ms = few_shots_ms = shadow_ms = 0.0
+ 
+@@ -264,8 +269,25 @@ class LLMHookHandler:
+             getattr(self._config, "enable_social_context_injection", True)
+         )
+         if not social_enabled:
+-            logger.debug("[LLM Hook] 社交关系上下文注入已关闭，跳过社交上下文")
+-            return None
++            # Style is independent of social features. Never borrow another group's patterns.
++            style_enabled = bool(getattr(self._config, "enable_style_learning", False))
++            expressions_enabled = bool(getattr(self._config, "enable_expression_patterns", False))
++            targets = getattr(self._config, "target_qq_list", []) or []
++            groups = {str(t)[6:] for t in targets if str(t).startswith("group_")}
++            if (not style_enabled or not expressions_enabled or not self._social_context_injector
++                    or str(group_id) not in groups):
++                return None
++            try:
++                result = await self._social_context_injector._format_expression_patterns_context(
++                    group_id, persona_id=persona_id, user_id=None,
++                    enable_protection=True, enable_global_fallback=False,
++                )
++                if result:
++                    logger.info("[LLM Hook] isolated group style injected: group=%s persona=%s", group_id, persona_id)
++                return result
++            except Exception as exc:
++                logger.warning("[LLM Hook] group style unavailable: %s", type(exc).__name__)
++                return None
+         if not self._social_context_injector:
+             logger.debug("[LLM Hook] social_context_injector未初始化，跳过社交上下文注入")
+             return None
+diff --git a/services/integration/mem0_memory_manager.py b/services/integration/mem0_memory_manager.py
+index 069eafd..129c80c 100644
+--- a/services/integration/mem0_memory_manager.py
++++ b/services/integration/mem0_memory_manager.py
+@@ -28,6 +28,7 @@ Design notes:
+ 
+ import asyncio
+ import os
++os.environ["MEM0_TELEMETRY"] = "false"
+ from typing import Any, Dict, List, Optional
+ 
+ from astrbot.api import logger
+@@ -135,11 +136,14 @@ def _create_framework_llm(llm_adapter):
+                     prompt=prompt,
+                     contexts=contexts or None,
+                     system_prompt=system_prompt,
++                    raise_on_error=True,
+                 ),
+                 loop,
+             )
+             result = future.result(timeout=120)
+-            return result or ""
++            if not result:
++                raise RuntimeError("Framework LLM returned an empty memory result")
++            return result
+ 
+     return _FrameworkLLM()
+ 
+@@ -258,7 +262,8 @@ class Mem0MemoryManager:
+                 metadata={"sender_name": message.sender_name},
+             )
+         except Exception as exc:
+-            logger.debug(f"[Mem0] add_memory failed: {exc}")
++            logger.warning(f"[Mem0] add_memory failed; message will retry: {exc}")
++            raise
+ 
+     @monitored
+     async def get_related_memories(
+@@ -351,7 +356,12 @@ class Mem0MemoryManager:
+         both are replaced with framework bridges (see ``start``), so no
+         API credentials are needed here.
+         """
+-        config: Dict[str, Any] = {"version": "v1.1"}
++        config: Dict[str, Any] = {
++            "version": "v1.1",
++            "history_db_path": os.path.join(
++                self._config.data_dir, "mem0_history.db"
++            ),
++        }
+ 
+         # Provide placeholder LLM and embedder configs so Memory.__init__
+         # can construct OpenAI clients without error.  Both instances are
+diff --git a/tests/unit/test_background_request_gate.py b/tests/unit/test_background_request_gate.py
+new file mode 100644
+index 0000000..9737d12
+--- /dev/null
++++ b/tests/unit/test_background_request_gate.py
+@@ -0,0 +1,61 @@
++import asyncio
++import time
++
++import pytest
++
++from self_learning_EterU.utils.background_request_gate import BackgroundRequestGate
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_gate_serializes_background_calls():
++    gate = BackgroundRequestGate(foreground_grace=0)
++    active = 0
++    peak = 0
++
++    async def worker():
++        nonlocal active, peak
++        async with gate.slot():
++            active += 1
++            peak = max(peak, active)
++            await asyncio.sleep(0.005)
++            active -= 1
++
++    await asyncio.gather(*(worker() for _ in range(8)))
++
++    assert peak == 1
++    assert gate.pending == 0
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_foreground_and_rate_limit_defer_following_background_calls():
++    gate = BackgroundRequestGate(
++        foreground_grace=0.02,
++        rate_limit_cooldown=0.02,
++    )
++    gate.note_foreground_request()
++    started = time.monotonic()
++    async with gate.slot():
++        pass
++    assert time.monotonic() - started >= 0.015
++
++    with pytest.raises(RuntimeError, match="gateway_concurrency_limit"):
++        async with gate.slot():
++            raise RuntimeError("gateway_concurrency_limit")
++
++    started = time.monotonic()
++    async with gate.slot():
++        pass
++    assert time.monotonic() - started >= 0.015
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_queue_capacity_rejects_excess_work_without_leaking_count():
++    gate = BackgroundRequestGate(capacity=1, foreground_grace=0)
++    async with gate.slot():
++        with pytest.raises(RuntimeError, match="queue is full"):
++            async with gate.slot():
++                pass
++    assert gate.pending == 0
+diff --git a/tests/unit/test_framework_llm_adapter.py b/tests/unit/test_framework_llm_adapter.py
+index ad422d5..b4f1b2f 100644
+--- a/tests/unit/test_framework_llm_adapter.py
++++ b/tests/unit/test_framework_llm_adapter.py
+@@ -1,5 +1,6 @@
+ """Regression coverage for framework LLM provider rebinding."""
+ 
++import asyncio
+ from types import SimpleNamespace
+ from unittest.mock import AsyncMock, Mock
+ 
+@@ -53,3 +54,82 @@ async def test_filter_call_rebinds_provider_and_retries_once_on_stale_model_erro
+     assert adapter.call_stats["filter"]["errors"] == 0
+     old_provider.text_chat.assert_awaited_once()
+     new_provider.text_chat.assert_awaited_once()
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_background_provider_calls_are_serialized_across_adapter_instances():
++    active = 0
++    max_active = 0
++
++    async def text_chat(**kwargs):
++        nonlocal active, max_active
++        active += 1
++        max_active = max(max_active, active)
++        await asyncio.sleep(0.01)
++        active -= 1
++        return SimpleNamespace(completion_text=kwargs["prompt"])
++
++    provider = _chat_provider("chat-a", "live-model")
++    provider.text_chat = AsyncMock(side_effect=text_chat)
++    adapters = [
++        FrameworkLLMAdapter(SimpleNamespace()),
++        FrameworkLLMAdapter(SimpleNamespace()),
++    ]
++    for adapter in adapters:
++        adapter.filter_provider = provider
++
++    results = await asyncio.gather(
++        adapters[0].filter_chat_completion("one"),
++        adapters[1].filter_chat_completion("two"),
++    )
++
++    assert results == ["one", "two"]
++    assert max_active == 1
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_filter_failure_is_not_cached_and_strict_call_raises():
++    provider = _chat_provider("chat-a", "live-model")
++    provider.text_chat = AsyncMock(
++        side_effect=[RuntimeError("429 concurrency"), SimpleNamespace(completion_text="ok")]
++    )
++    adapter = FrameworkLLMAdapter(SimpleNamespace())
++    adapter.filter_provider = provider
++
++    assert await adapter.filter_chat_completion("retry-me") is None
++    assert await adapter.filter_chat_completion("retry-me") == "ok"
++
++    provider.text_chat.side_effect = RuntimeError("503 unavailable")
++    with pytest.raises(RuntimeError, match="503 unavailable"):
++        await adapter.filter_chat_completion("strict", raise_on_error=True)
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_non_strict_waiter_keeps_legacy_none_on_shared_failure():
++    release = asyncio.Event()
++
++    async def fail_after_wait(**kwargs):
++        await release.wait()
++        raise RuntimeError("429 concurrency")
++
++    provider = _chat_provider("chat-a", "live-model")
++    provider.text_chat = AsyncMock(side_effect=fail_after_wait)
++    adapter = FrameworkLLMAdapter(SimpleNamespace())
++    adapter.filter_provider = provider
++
++    strict = asyncio.create_task(
++        adapter.filter_chat_completion("same", raise_on_error=True)
++    )
++    while not adapter._filter_inflight:
++        await asyncio.sleep(0)
++    legacy = asyncio.create_task(adapter.filter_chat_completion("same"))
++    await asyncio.sleep(0)
++    release.set()
++
++    with pytest.raises(RuntimeError, match="429 concurrency"):
++        await strict
++    assert await legacy is None
++    provider.text_chat.assert_awaited_once()
+diff --git a/tests/unit/test_v2_ingestion_retry.py b/tests/unit/test_v2_ingestion_retry.py
+new file mode 100644
+index 0000000..c60cf4f
+--- /dev/null
++++ b/tests/unit/test_v2_ingestion_retry.py
+@@ -0,0 +1,137 @@
++import asyncio
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import pytest
++
++from self_learning_EterU.core.interfaces import MessageData
++from self_learning_EterU.services.core_learning.v2_learning_integration import (
++    V2LearningIntegration,
++)
++from self_learning_EterU.services.core_learning import v2_learning_integration
++
++
++def _message() -> MessageData:
++    return MessageData(
++        sender_id="user-a",
++        sender_name="User A",
++        message="这是一条足够长的记忆写入重试测试消息",
++        group_id="group-a",
++        timestamp=1.0,
++        platform="test",
++    )
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_memory_ingestion_failure_requeues_message_until_success():
++    message = _message()
++    memory_manager = SimpleNamespace(
++        add_memory_from_message=AsyncMock(
++            side_effect=[RuntimeError("429 concurrency"), None]
++        )
++    )
++    integration = V2LearningIntegration.__new__(V2LearningIntegration)
++    integration._knowledge_manager = None
++    integration._memory_manager = memory_manager
++    integration._feature_delegation = None
++    integration._ingestion_buffer = {"group-a": [message]}
++    integration._ingestion_targets = {id(message): {"memory"}}
++
++    with pytest.raises(RuntimeError, match="requeued 1 message"):
++        await integration._flush_ingestion_buffer("group-a")
++
++    assert integration._ingestion_buffer["group-a"] == [message]
++    assert integration._ingestion_targets[id(message)] == {"memory"}
++
++    await integration._flush_ingestion_buffer("group-a")
++
++    assert integration._ingestion_buffer.get("group-a", []) == []
++    assert id(message) not in integration._ingestion_targets
++    assert memory_manager.add_memory_from_message.await_count == 2
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_successful_engine_is_not_repeated_when_other_engine_retries():
++    message = _message()
++    knowledge_manager = SimpleNamespace(
++        process_message_for_knowledge_graph=AsyncMock(return_value=None)
++    )
++    memory_manager = SimpleNamespace(
++        add_memory_from_message=AsyncMock(
++            side_effect=[RuntimeError("503 unavailable"), None]
++        )
++    )
++    integration = V2LearningIntegration.__new__(V2LearningIntegration)
++    integration._knowledge_manager = knowledge_manager
++    integration._memory_manager = memory_manager
++    integration._feature_delegation = None
++    integration._ingestion_buffer = {"group-a": [message]}
++    integration._ingestion_targets = {id(message): {"knowledge", "memory"}}
++
++    with pytest.raises(RuntimeError):
++        await integration._flush_ingestion_buffer("group-a")
++    await integration._flush_ingestion_buffer("group-a")
++
++    knowledge_manager.process_message_for_knowledge_graph.assert_awaited_once()
++    assert memory_manager.add_memory_from_message.await_count == 2
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_single_buffered_message_flushes_without_another_message(monkeypatch):
++    monkeypatch.setattr(
++        v2_learning_integration,
++        "_INGESTION_FLUSH_INTERVAL_SECONDS",
++        0.01,
++    )
++    integration = V2LearningIntegration.__new__(V2LearningIntegration)
++    integration._started = True
++    integration._ingestion_buffer = {"group-a": [_message()]}
++    integration._ingestion_flush_tasks = {}
++
++    async def flush(_name, group_id):
++        integration._ingestion_buffer[group_id] = []
++        return True
++
++    integration._trigger = SimpleNamespace(force_tier2=AsyncMock(side_effect=flush))
++
++    integration._schedule_ingestion_flush("group-a")
++    await asyncio.sleep(0.04)
++
++    integration._trigger.force_tier2.assert_awaited_once_with(
++        "ingestion_flush", "group-a"
++    )
++    assert integration._ingestion_flush_tasks == {}
++
++
++@pytest.mark.unit
++@pytest.mark.asyncio
++async def test_scheduled_flush_retries_while_requeued_messages_remain(monkeypatch):
++    monkeypatch.setattr(
++        v2_learning_integration,
++        "_INGESTION_FLUSH_INTERVAL_SECONDS",
++        0.01,
++    )
++    integration = V2LearningIntegration.__new__(V2LearningIntegration)
++    integration._started = True
++    integration._ingestion_buffer = {"group-a": [_message()]}
++    integration._ingestion_flush_tasks = {}
++    attempts = 0
++
++    async def flush(_name, group_id):
++        nonlocal attempts
++        attempts += 1
++        if attempts == 2:
++            integration._ingestion_buffer[group_id] = []
++            return True
++        return False
++
++    integration._trigger = SimpleNamespace(force_tier2=AsyncMock(side_effect=flush))
++
++    integration._schedule_ingestion_flush("group-a")
++    await asyncio.sleep(0.06)
++
++    assert integration._trigger.force_tier2.await_count == 2
++    assert integration._ingestion_flush_tasks == {}
+diff --git a/utils/background_request_gate.py b/utils/background_request_gate.py
+new file mode 100644
+index 0000000..5e4b924
+--- /dev/null
++++ b/utils/background_request_gate.py
+@@ -0,0 +1,90 @@
++"""Bounded gate for background model calls made by self-learning."""
++
++import asyncio
++import time
++import weakref
++from contextlib import asynccontextmanager
++
++
++class BackgroundRequestGate:
++    def __init__(
++        self,
++        capacity: int = 32,
++        wait_timeout: float = 180.0,
++        foreground_grace: float = 10.0,
++        rate_limit_cooldown: float = 30.0,
++    ) -> None:
++        self.capacity = capacity
++        self.wait_timeout = wait_timeout
++        self.foreground_grace = foreground_grace
++        self.rate_limit_cooldown = rate_limit_cooldown
++        self.pending = 0
++        self._lock = asyncio.Lock()
++        self._quiet_until = 0.0
++
++    def note_foreground_request(self) -> None:
++        self._quiet_until = max(
++            self._quiet_until,
++            time.monotonic() + self.foreground_grace,
++        )
++
++    @asynccontextmanager
++    async def slot(self):
++        if self.pending >= self.capacity:
++            raise RuntimeError("self-learning background model queue is full")
++
++        self.pending += 1
++        acquired = False
++        deadline = time.monotonic() + self.wait_timeout
++        try:
++            await asyncio.wait_for(
++                self._lock.acquire(), timeout=self.wait_timeout
++            )
++            acquired = True
++            while self._quiet_until > time.monotonic():
++                remaining = deadline - time.monotonic()
++                if remaining <= 0:
++                    raise TimeoutError(
++                        "self-learning background model queue deadline exceeded"
++                    )
++                await asyncio.sleep(
++                    min(self._quiet_until - time.monotonic(), remaining)
++                )
++            yield
++        except Exception as exc:
++            message = str(exc).lower()
++            if (
++                getattr(exc, "status_code", None) == 429
++                or "gateway_concurrency_limit" in message
++                or "too many requests" in message
++            ):
++                self._quiet_until = max(
++                    self._quiet_until,
++                    time.monotonic() + self.rate_limit_cooldown,
++                )
++            raise
++        finally:
++            if acquired:
++                self._lock.release()
++            self.pending -= 1
++
++
++_GATES = weakref.WeakKeyDictionary()
++
++
++def get_background_request_gate() -> BackgroundRequestGate:
++    loop = asyncio.get_running_loop()
++    gate = _GATES.get(loop)
++    if gate is None:
++        gate = BackgroundRequestGate()
++        _GATES[loop] = gate
++    return gate
++
++
++def note_foreground_request() -> None:
++    get_background_request_gate().note_foreground_request()
++
++
++async def queued_text_chat(provider, **kwargs):
++    async with get_background_request_gate().slot():
++        return await provider.text_chat(**kwargs)
+-- 
+2.55.0.windows.5
+
