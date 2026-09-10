@@ -1,4 +1,5 @@
-FROM soulter/astrbot@sha256:a28e76163b0c49e78b978a79d5b8b93f94ca955332b26dfa3a203a367d303e9c
+FROM soulter/astrbot@sha256:cf271483d2f03d2220b2c1ec5574747f4ebbdba27396421ef2e785474255856e
 
-RUN uv pip install --system "playwright==1.62.0" "funasr-onnx==0.4.2" "modelscope==1.39.1" \
+COPY runtime-python-requirements.txt /tmp/astrbot-runtime-requirements.txt
+RUN uv pip install --system -r /tmp/astrbot-runtime-requirements.txt \
     && python -m playwright install --with-deps chromium chromium-headless-shell
