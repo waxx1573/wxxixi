@@ -6,7 +6,10 @@ import logging
 import time
 from collections import OrderedDict
 
-log = logging.getLogger("astrbot.spectre.semantic_decision")
+try:
+    from astrbot.api.all import logger as log
+except ImportError:
+    log = logging.getLogger("astrbot.spectre.semantic_decision")
 
 
 class SemanticDecision:
