@@ -8,11 +8,16 @@
 4. 多层消息去重（rawid、内容、自回复）
 """
 
+import base64
+import io
+import wave
+from urllib.parse import urljoin, urlsplit
 import json
 import logging
 import os
 import queue
 import re
+import tempfile
 import threading
 import time
 from collections import defaultdict
@@ -25,6 +30,72 @@ import config
 from ob_protocol import push_event, make_message_event
 
 log = logging.getLogger("ob11-bridge")
+
+_MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024
+_MAX_INLINE_AUDIO_BYTES = 8 * 1024 * 1024
+
+
+def _image_extension(payload: bytes) -> str | None:
+    """Identify supported image bytes without trusting URL or Content-Type."""
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if payload.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if payload.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if len(payload) >= 12 and payload[:4] == b"RIFF" and payload[8:12] == b"WEBP":
+        return ".webp"
+    return None
+
+
+def _image_segment_from_path(image_path: str | None) -> dict | None:
+    """Build a portable OneBot image segment for the remote AstrBot host."""
+    if not image_path:
+        return None
+    try:
+        size = os.path.getsize(image_path)
+        if size <= 0 or size > _MAX_INLINE_IMAGE_BYTES:
+            log.warning("微信图片无法内联: size=%s path=%s", size, image_path)
+            return None
+        with open(image_path, "rb") as image_file:
+            payload = image_file.read(_MAX_INLINE_IMAGE_BYTES + 1)
+        if not payload or len(payload) > _MAX_INLINE_IMAGE_BYTES:
+            return None
+    except OSError as exc:
+        log.warning("读取微信图片失败: %s (%s)", image_path, type(exc).__name__)
+        return None
+    encoded = base64.b64encode(payload).decode("ascii")
+    return {"type": "image", "data": {"file": f"base64://{encoded}"}}
+
+
+def _is_voice_message(data: dict) -> bool:
+    """WeFlow SSE supplies an exact placeholder; REST also supplies typed fields."""
+    kind = data.get("type") or data.get("msgType") or data.get("localType")
+    media = str(data.get("mediaType") or "").lower()
+    return str(kind) == "34" or media in {"voice", "audio", "record", "sound"} or any(
+        str(data.get(key) or "").strip() in {"[语音]", "[语音消息]"}
+        for key in ("content", "parsedContent")
+    )
+
+
+def _audio_segment_from_path(audio_path: str | None) -> dict | None:
+    """Build a portable OneBot record segment for the remote AstrBot host."""
+    if not audio_path:
+        return None
+    try:
+        size = os.path.getsize(audio_path)
+        if size <= 0 or size > _MAX_INLINE_AUDIO_BYTES:
+            log.warning("微信语音无法内联: size=%s path=%s", size, audio_path)
+            return None
+        with open(audio_path, "rb") as audio_file:
+            payload = audio_file.read(_MAX_INLINE_AUDIO_BYTES + 1)
+        if not payload or len(payload) > _MAX_INLINE_AUDIO_BYTES:
+            return None
+    except OSError as exc:
+        log.warning("读取微信语音失败: %s (%s)", audio_path, type(exc).__name__)
+        return None
+    encoded = base64.b64encode(payload).decode("ascii")
+    return {"type": "record", "data": {"file": f"base64://{encoded}"}}
 
 
 # ============ 桥接核心 ============
@@ -48,6 +119,43 @@ class WeFlowBridge:
         self._pending_image = {}  # talkerId → {"caption": None|str, "event": threading.Event()}
         self._pending_mention_images = {}  # session_id → {"data": data, "time": timestamp} 先图后文暂存
 
+    def resolve_group_contact(self, session_id, fallback=""):
+        """Resolve UI target by stable WeFlow identity, never by a member name."""
+        if not session_id or "@chatroom" not in session_id:
+            return fallback
+        now = time.monotonic()
+        cached = self.contact_map.get(session_id)
+        if cached and now - cached[1] < 300:
+            return cached[0]
+        try:
+            response = requests.get(
+                f"{config.WE_FLOW_BASE_URL}/api/v1/contacts",
+                params={"access_token": config.ACCESS_TOKEN}, timeout=8,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            rows = payload.get("data", payload) if isinstance(payload, dict) else payload
+            if isinstance(rows, dict):
+                rows = rows.get("contacts", rows.get("items", []))
+            matches = set()
+            for item in rows if isinstance(rows, list) else []:
+                if not isinstance(item, dict):
+                    continue
+                wxid = str(item.get("username") or item.get("wxid") or item.get("id") or item.get("userName") or "").strip()
+                if wxid != session_id:
+                    continue
+                name = str(item.get("remark") or item.get("nickname") or item.get("displayName") or item.get("name") or "").strip()
+                if name and "@chatroom" not in name:
+                    matches.add(name)
+            if len(matches) == 1:
+                name = matches.pop()
+                self.contact_map[session_id] = (name, now)
+                return name
+        except Exception as exc:
+            log.warning("群名查询失败: %s", type(exc).__name__)
+        # A genuine groupName from SSE is usable; a raw ID must fail safely in UIA.
+        return fallback or session_id
+
     def should_ignore(self, data):
         content = data.get("content", "")
         msg_type = data.get("type", 0) or data.get("msgType", 0)
@@ -55,10 +163,8 @@ class WeFlowBridge:
             return True
         if config.BOT_WXID and data.get("talkerId", "") == config.BOT_WXID:
             return True
-        if msg_type in (34,):  # 34=语音
-            return True
-        if content and "[语音]" in content:
-            return True
+        if _is_voice_message(data):
+            return False
         if not content or content.strip() == "":
             return True
         return False
@@ -101,6 +207,12 @@ class WeFlowBridge:
             if group_name not in config.ALLOWED_GROUPS and session_id_data not in config.ALLOWED_GROUPS:
                 return
 
+        if _is_voice_message(data):
+            if is_group and state.group_reply_mode == "mention" and not self._is_mentioned(data):
+                return
+            threading.Thread(target=self.process_voice_message, args=(data,), daemon=True).start()
+            return
+
         if content == "[图片]":
             # 图片消息（mention 模式下需 @ 才处理）
             if is_group and state.group_reply_mode == "mention" and not self._is_mentioned(data):
@@ -131,10 +243,10 @@ class WeFlowBridge:
         sender_in_group = data.get("senderName", "") or data.get("sender", "") or data.get("sourceName", "")
 
         if is_group:
-            if state.group_reply_mode == "mention" and not self._is_mentioned(data):
+            if state.group_reply_mode == "mention" and not self._is_mentioned(data) and not any(k.casefold() in content.casefold() for k in (config.BOT_NICKNAMES + ["皮皮", "pipi"])):
                 log.debug(f"⏭️ mention 模式跳过（未检测到 @）: data keys={list(data.keys())} nickname={config.BOT_NICKNAMES} content={content[:40]}")
                 return
-            group_raw = group_name_raw or source_name
+            group_raw = group_name_raw or session_id_data
             base_name = re.sub(r'\s*\(\d+\)\s*$', '', group_raw).strip()
             contact = base_name
         else:
@@ -184,7 +296,7 @@ class WeFlowBridge:
                         threading.Thread(
                             target=self._inject_cached_image,
                             args=(cached["data"].get("sessionId", session_id_data),
-                                  buffer_key, version),
+                                  cached["data"], buffer_key, version),
                             daemon=True,
                         ).start()
 
@@ -203,10 +315,12 @@ class WeFlowBridge:
             entry = self.pending_buffers[sender_id]
             if version is not None and entry.get("timer_version", 0) != version:
                 return
-            if not entry["messages"]:
+            if not entry["messages"] and not entry.get("segments"):
                 return
             msgs = entry["messages"].copy()
+            media_segments = list(entry.get("segments", []))
             entry["messages"] = []
+            entry["segments"] = []
             entry["processing"] = True
             if entry["timer"]:
                 entry["timer"].cancel()
@@ -214,8 +328,19 @@ class WeFlowBridge:
 
         contact = entry.get("contact", sender_id)
         is_group = entry.get("is_group", False)
+        if is_group:
+            session_id = entry.get("session_id_data", "")
+            group_name = entry.get("group_name", "")
+            # Missing SSE names can be the sender nickname or the raw chatroom ID.
+            fallback = group_name if group_name and "@chatroom" not in group_name else session_id
+            contact = self.resolve_group_contact(session_id, fallback)
+            entry["contact"] = contact
+            entry["group_name"] = contact
         combined = "\n".join(msgs)
-        log.info(f"推送 {len(msgs)} 条消息 [{'群' if is_group else '私'}|{contact}]")
+        log.info(
+            "推送 %d 条消息、%d 个媒体段 [%s|%s]",
+            len(msgs), len(media_segments), "群" if is_group else "私", contact,
+        )
 
         # 构建 OneBot 事件（user_id 要用发言人身份，不能用群 sessionId）
         if is_group:
@@ -235,32 +360,40 @@ class WeFlowBridge:
                 # 去掉消息中的 @机器人 纯文本，换为 OneBot at 元素
                 clean_text = combined
                 for nick in config.BOT_NICKNAMES:
-                    at_pattern = f"@{nick}"
-                    if at_pattern in clean_text:
-                        clean_text = clean_text.replace(at_pattern, "").strip()
+                    for at_pattern in (f"@{nick}", f"＠{nick}"):
+                        if at_pattern in clean_text:
+                            clean_text = clean_text.replace(at_pattern, "").strip()
 
                 formatted = clean_text
-                if sender_name:
-                    formatted = f'{sender_name}在群{entry.get("group_name", contact)}中说：{clean_text}'
 
-            # 已通过本地回复策略的群消息需要唤醒 AstrBot 的模型管线。
-            if state.group_reply_mode in ("mention", "all", "batch"):
-                msg_segments = [
-                    {"type": "at", "data": {"qq": str(state._self_id_int)}},
-                    {"type": "text", "data": {"text": f" {formatted}"}},
-                ]
+            # Preserve user intent: ordinary messages must not wake the native Agent.
+            mentioned = any(self._is_mentioned({"content": text}) for text in msgs)
+            if mentioned:
+                msg_segments = [{"type": "at", "data": {"qq": str(state._self_id_int)}}]
+                if formatted:
+                    msg_segments.append({"type": "text", "data": {"text": f" {formatted}"}})
             else:
-                msg_segments = [
-                    {"type": "text", "data": {"text": formatted}},
-                ]
+                msg_segments = []
+                if formatted:
+                    msg_segments.append({"type": "text", "data": {"text": formatted}})
+            msg_segments.extend(media_segments)
             event = make_message_event("group", user_id, msg_segments,
                                        group_id=group_id,
                                        group_name=entry.get("group_name", contact),
                                        nickname=sender_name)
+            # Original mention evidence remains available to existing plugins.
+            event["wxbridge"] = {
+                "synthetic_wakeup": False,
+                "mentioned": mentioned,
+                "mention_source": "nickname_text",
+            }
         else:
             sender_name = entry.get("source_name", contact)
-            event = make_message_event("private", user_id,
-                                       [{"type": "text", "data": {"text": combined}}],
+            msg_segments = []
+            if combined:
+                msg_segments.append({"type": "text", "data": {"text": combined}})
+            msg_segments.extend(media_segments)
+            event = make_message_event("private", user_id, msg_segments,
                                        nickname=sender_name)
 
         # 记录 user_id → contact 映射，供 API 回复时查找
@@ -274,6 +407,13 @@ class WeFlowBridge:
         log.info("[OB11] 入站关联: message_id=%s group_id=%s",
                  event.get("message_id"), event.get("group_id"))
         sent = push_event(event)
+        if sent <= 0 and is_group:
+            for _ in range(12):
+                time.sleep(2.5)
+                sent = push_event(event)
+                if sent > 0:
+                    log.info(f"✅ AstrBot 重连后补推成功 [{contact}]")
+                    break
         if sent > 0:
             log.info(f"✅ 已推送至 {sent} 个 AstrBot 客户端 [{contact}]")
         else:
@@ -348,58 +488,95 @@ class WeFlowBridge:
         finally:
             self._sse_session = None
 
-    def _fetch_wechat_image(self, talker: str) -> str | None:
-        """从 WeFlow REST API 获取最新图片并保存到本地"""
+    def _fetch_wechat_image(self, talker: str, message=None) -> str | None:
+        """Download only the uniquely identified WeFlow image."""
+        message = message if isinstance(message, dict) else {}
+        server_id = str(message.get("rawid") or message.get("serverId") or "").strip()
+        local_id = str(message.get("localId") or "").strip()
+        stamp = message.get("timestamp") or message.get("createTime")
+        if not talker or not (server_id or local_id):
+            log.warning("图片缺少会话或原消息 ID，拒绝取最新图片代替")
+            return None
         try:
             url = f"{config.WE_FLOW_BASE_URL}/api/v1/messages"
             params = {
                 "access_token": config.ACCESS_TOKEN,
                 "talker": talker,
-                "media": "true",
-                "limit": 3,
+                "media": "1",
+                "image": "1",
+                "voice": "0",
+                "video": "0",
+                "emoji": "0",
+                "limit": 100,
             }
+            if stamp:
+                params.update(start=int(stamp) - 1, end=int(stamp) + 1)
             resp = requests.get(url, params=params, timeout=10)
-            if resp.status_code != 200:
-                log.error(f"WeFlow 消息API: HTTP {resp.status_code}")
-                return None
+            resp.raise_for_status()
 
             data = resp.json()
             messages = data if isinstance(data, list) else data.get("messages", data.get("data", []))
             if not isinstance(messages, list):
                 messages = []
 
-            for msg in messages:
-                if msg.get("mediaType") in ("image", "sticker", "emoji") and msg.get("mediaUrl"):
-                    media_url = msg["mediaUrl"]
-                    sep = "&" if "?" in media_url else "?"
-                    dl_url = f"{media_url}{sep}access_token={config.ACCESS_TOKEN}"
+            def matches_original(item):
+                if not isinstance(item, dict):
+                    return False
+                item_server_id = str(item.get("serverId") or item.get("serverIdRaw") or item.get("rawid") or "").strip()
+                item_local_id = str(item.get("localId") or "").strip()
+                if server_id and item_server_id != server_id:
+                    return False
+                if local_id and item_local_id != local_id:
+                    return False
+                if stamp:
+                    item_stamp = item.get("timestamp") or item.get("createTime")
+                    if item_stamp is None or int(item_stamp) != int(stamp):
+                        return False
+                media_type = str(item.get("mediaType") or "").lower()
+                local_type = str(item.get("localType") or item.get("type") or "")
+                return bool(item.get("mediaUrl")) and (media_type in {"image", "sticker", "emoji"} or local_type == "3")
 
-                    img_resp = requests.get(dl_url, timeout=30)
-                    if img_resp.status_code != 200:
+            matches = [item for item in messages if matches_original(item)]
+            if len(matches) != 1:
+                log.warning("原图片未唯一匹配或媒体未就绪: server_id=%s local_id=%s matches=%s", server_id, local_id, len(matches))
+                return None
+
+            media_url = urljoin(config.WE_FLOW_BASE_URL + "/", matches[0]["mediaUrl"])
+            parsed, base = urlsplit(media_url), urlsplit(config.WE_FLOW_BASE_URL)
+            if (parsed.scheme, parsed.hostname, parsed.port) != (base.scheme, base.hostname, base.port) or parsed.username or parsed.password:
+                raise ValueError("unexpected media origin")
+
+            img_resp = requests.get(media_url, params={"access_token": config.ACCESS_TOKEN}, timeout=30,
+                                    stream=True, allow_redirects=False)
+            try:
+                if img_resp.status_code != 200:
+                    raise ValueError("unexpected media response")
+                chunks, size = [], 0
+                for chunk in img_resp.iter_content(65536):
+                    if not chunk:
                         continue
+                    size += len(chunk)
+                    if size > _MAX_INLINE_IMAGE_BYTES:
+                        raise ValueError("image too large")
+                    chunks.append(chunk)
+                payload = b"".join(chunks)
+            finally:
+                close = getattr(img_resp, "close", None)
+                if callable(close):
+                    close()
 
-                    # 根据 Content-Type 确定扩展名
-                    ct = img_resp.headers.get("Content-Type", "")
-                    ext = ".jpg"
-                    if "png" in ct: ext = ".png"
-                    elif "gif" in ct: ext = ".gif"
-                    elif "webp" in ct: ext = ".webp"
-
-                    filename = f"wechat_{int(time.time())}{ext}"
-                    save_dir = os.path.join(config.ASTRBOT_ATTACHMENTS, "wechat_images")
-                    os.makedirs(save_dir, exist_ok=True)
-                    save_path = os.path.join(save_dir, filename)
-
-                    with open(save_path, "wb") as f:
-                        f.write(img_resp.content)
-
-                    log.info(f"✅ 微信图片已保存: {save_path}")
-                    return save_path
-
-            log.warning(f"消息列表无图片 mediaUrl (talker={talker})")
-            return None
-        except Exception as e:
-            log.error(f"获取微信图片异常: {e}")
+            ext = _image_extension(payload)
+            if not ext:
+                raise ValueError("response is not a supported image")
+            save_dir = os.path.join(config.ASTRBOT_ATTACHMENTS or tempfile.gettempdir(), "wechat_images")
+            os.makedirs(save_dir, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="wb", prefix="wechat_", suffix=ext, dir=save_dir, delete=False) as handle:
+                handle.write(payload)
+                save_path = handle.name
+            log.info("✅ 微信图片已保存: %s", save_path)
+            return save_path
+        except Exception as exc:
+            log.error("微信图片下载或验证失败: %s", type(exc).__name__)
             return None
 
     def process_image_message(self, data):
@@ -421,7 +598,8 @@ class WeFlowBridge:
 
         try:
             # 取图 + ollama 描述
-            image_path = self._fetch_wechat_image(session_id)
+            image_path = self._fetch_wechat_image(session_id, data)
+            image_segment = _image_segment_from_path(image_path)
             caption = None
             if image_path:
                 caption = caption_image_via_ollama(image_path)
@@ -444,12 +622,15 @@ class WeFlowBridge:
                     if batch_key in self.pending_buffers:
                         entry = self.pending_buffers[batch_key]
                         entry["messages"].insert(0, f'成员"{source_name}"在群"{group_name}"中对你说：[图片: {caption_text}]')
+                        if image_segment:
+                            entry.setdefault("segments", []).append(image_segment)
                         entry["image_ready"] = True
                         log.info(f"📝 图片已注入批处理队列")
                         return
                     # 没有文字排队，用 batch key 创建独立条目
                     self.pending_buffers[batch_key] = {
                         "messages": [f'成员"{source_name}"在群"{group_name}"中对你说：[图片: {caption_text}]'],
+                        "segments": [image_segment] if image_segment else [],
                         "timer": None,
                         "timer_version": 0,
                         "processing": False,
@@ -471,6 +652,8 @@ class WeFlowBridge:
                     # 已有文本在排队，注入图片上下文
                     entry = self.pending_buffers[talker_id]
                     entry["messages"].insert(0, f"[图片: {caption_text}]")
+                    if image_segment:
+                        entry.setdefault("segments", []).append(image_segment)
                     entry["image_ready"] = True
                     log.info(f"📝 图片已注入待处理文本队列")
                 else:
@@ -478,6 +661,7 @@ class WeFlowBridge:
                     log.info(f"📩 图片无文本跟随，直接处理")
                     self.pending_buffers[talker_id] = {
                         "messages": [f"[图片: {caption_text}]"],
+                        "segments": [image_segment] if image_segment else [],
                         "timer": None,
                         "timer_version": 0,
                         "processing": False,
@@ -498,6 +682,81 @@ class WeFlowBridge:
             # 确保 Event 被设置
             img_event.set()
 
+    def _fetch_wechat_audio(self, talker: str, message=None) -> str | None:
+        """Download only the identified WeFlow voice, with bounded same-origin access."""
+        raw_id = str((message or {}).get("rawid") or (message or {}).get("serverId") or "").strip()
+        if not talker or not raw_id:
+            log.warning("语音缺少会话或原消息 ID，拒绝取其他语音代替")
+            return None
+        try:
+            params = {"access_token": config.ACCESS_TOKEN, "talker": talker, "media": "true", "limit": 100}
+            stamp = (message or {}).get("timestamp") or (message or {}).get("createTime")
+            if stamp:
+                params.update(start=int(stamp) - 1, end=int(stamp) + 1)
+            resp = requests.get(f"{config.WE_FLOW_BASE_URL}/api/v1/messages", params=params, timeout=15)
+            resp.raise_for_status()
+            payload = resp.json()
+            rows = payload if isinstance(payload, list) else payload.get("messages", payload.get("data", []))
+            matches = [item for item in rows if isinstance(item, dict)
+                       and str(item.get("serverId") or item.get("serverIdRaw") or item.get("rawid") or "") == raw_id
+                       and _is_voice_message(item)] if isinstance(rows, list) else []
+            if len(matches) != 1 or not matches[0].get("mediaUrl"):
+                log.warning("原语音未唯一匹配或媒体未就绪: message_id=%s", raw_id)
+                return None
+            url = urljoin(config.WE_FLOW_BASE_URL + "/", matches[0]["mediaUrl"])
+            parsed, base = urlsplit(url), urlsplit(config.WE_FLOW_BASE_URL)
+            if (parsed.scheme, parsed.hostname, parsed.port) != (base.scheme, base.hostname, base.port) or parsed.username or parsed.password:
+                raise ValueError("unexpected media origin")
+            with requests.get(url, params={"access_token": config.ACCESS_TOKEN}, timeout=30,
+                              stream=True, allow_redirects=False) as audio_resp:
+                if audio_resp.status_code != 200:
+                    raise ValueError("unexpected media response")
+                chunks, size = [], 0
+                for chunk in audio_resp.iter_content(65536):
+                    size += len(chunk)
+                    if size > _MAX_INLINE_AUDIO_BYTES:
+                        raise ValueError("audio too large")
+                    chunks.append(chunk)
+            payload = b"".join(chunks)
+            # The installed WeFlow exports voice as PCM WAV. Validate bytes, not suffix.
+            with wave.open(io.BytesIO(payload), "rb") as wav:
+                if wav.getnframes() <= 0 or wav.getframerate() <= 0:
+                    raise ValueError("empty audio")
+            audio_dir = os.path.join(config.ASTRBOT_ATTACHMENTS or tempfile.gettempdir(), "wechat_audio")
+            os.makedirs(audio_dir, exist_ok=True)
+            with tempfile.NamedTemporaryFile(mode="wb", prefix="wechat_voice_", suffix=".wav", dir=audio_dir, delete=False) as handle:
+                handle.write(payload)
+                return handle.name
+        except Exception as exc:
+            log.error("微信语音下载或验证失败: %s", type(exc).__name__)
+            return None
+
+    def process_voice_message(self, data):
+        """下载微信语音并作为 OneBot record 段转发；失败仍保留可见文本。"""
+        session_id = data.get("sessionId", "")
+        source_name = data.get("senderName") or data.get("sender") or data.get("sourceName") or "未知"
+        group_name = data.get("groupName", "")
+        talker_id = f"{session_id}_{source_name}" if "@chatroom" in session_id else session_id
+        is_group = bool(group_name) or "@chatroom" in session_id
+        audio_path = None
+        try:
+            audio_path = self._fetch_wechat_audio(session_id, data)
+            segment = _audio_segment_from_path(audio_path)
+            if segment:
+                log.info("语音已转换为 OneBot record 段: %s", source_name)
+            else:
+                log.warning("语音下载或内联失败，保留 [语音] 文本: %s", source_name)
+            self.add_text_to_buffer(talker_id, source_name, group_name, session_id, "" if segment else "[语音下载失败，未获得可识别音频]", is_group, talker_id, media_segment=segment)
+        except Exception as exc:
+            log.warning("语音处理异常，保留文本: %s", type(exc).__name__)
+            self.add_text_to_buffer(talker_id, source_name, group_name, session_id, "[语音]", is_group, talker_id)
+        finally:
+            if audio_path:
+                try:
+                    os.unlink(audio_path)
+                except OSError:
+                    pass
+
     def process_emoji_message(self, data):
         """处理表情包消息：尝试下载图片并描述，失败则保留原文转发"""
         session_id = data.get("sessionId", "")
@@ -513,8 +772,11 @@ class WeFlowBridge:
 
         # 尝试下载图片描述
         try:
-            image_path = self._fetch_wechat_image(session_id)
+            image_path = self._fetch_wechat_image(session_id, data)
+            image_segment = _image_segment_from_path(image_path)
             if image_path:
+                if image_segment:
+                    image_segment["data"]["sub_type"] = 1
                 caption = caption_image_via_ollama(image_path)
                 if caption:
                     content = f"[表情: {caption}]"
@@ -526,17 +788,19 @@ class WeFlowBridge:
 
             # 直接注入缓冲区（不等待，立即推送）
             self.add_text_to_buffer(talker_id, source_name, group_name,
-                                    session_id, content, is_group, talker_id)
+                                    session_id, content, is_group, talker_id,
+                                    image_segment=image_segment)
         except Exception as e:
             log.warning(f"😀 表情包处理异常: {e}")
             # 异常时也保底发送原文
             self.add_text_to_buffer(talker_id, source_name, group_name,
                                     session_id, content, is_group, talker_id)
 
-    def _inject_cached_image(self, session_id, buffer_key, version):
+    def _inject_cached_image(self, session_id, message, buffer_key, version):
         """下载缓存图片 → 描述 → 注入到 buffer 条目（在缓冲计时器到期前完成）"""
         try:
-            img_path = self._fetch_wechat_image(session_id)
+            img_path = self._fetch_wechat_image(session_id, message)
+            image_segment = _image_segment_from_path(img_path)
             caption = None
             if img_path:
                 caption = caption_image_via_ollama(img_path)
@@ -548,6 +812,8 @@ class WeFlowBridge:
                     # 版本匹配才注入（版本变了说明被新消息重置过）
                     if entry.get("timer_version") == version:
                         entry["messages"].insert(0, text)
+                        if image_segment:
+                            entry.setdefault("segments", []).append(image_segment)
                         log.info(f"📸 缓存图片已注入: {text[:60]}")
                     else:
                         log.info(f"📸 缓存图片跳过（buffer 版本已变更）")
@@ -555,7 +821,8 @@ class WeFlowBridge:
             log.warning(f"📸 缓存图片处理异常: {e}")
 
     def add_text_to_buffer(self, session_id_data, source_name, group_name,
-                           session_id, content, is_group, sender_key):
+                           session_id, content, is_group, sender_key,
+                           image_segment=None, media_segment=None):
         """通用：将一段文本直接加入缓冲队列（供表情/图片等异步处理完后调用）"""
         with self.buffer_lock:
             buffer_key = sender_key
@@ -573,7 +840,12 @@ class WeFlowBridge:
                     "sender_in_group": source_name if is_group else "",
                 }
             entry = self.pending_buffers[buffer_key]
-            entry["messages"].append(content)
+            if content:
+                entry["messages"].append(content)
+            if image_segment:
+                entry.setdefault("segments", []).append(image_segment)
+            if media_segment:
+                entry.setdefault("segments", []).append(media_segment)
 
             if not entry["processing"]:
                 if entry["timer"]:
