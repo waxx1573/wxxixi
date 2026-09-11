@@ -1,5 +1,0 @@
-name: astrbot_plugin_wechat_bridge
-display_name: WeChat Bridge
-desc: Manage the Windows WeChat UIA bridge from AstrBot commands.
-version: v0.1.0
-author: qiuse

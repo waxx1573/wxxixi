@@ -95,7 +95,7 @@ Web 控制面板：`http://127.0.0.1:8766`
 | `weflow_send_api` | WeFlow 发送消息 API 地址 |
 | `buffer_seconds` | 消息缓冲秒数，多条消息合并后统一推送 |
 | `web_port` | Web 控制面板端口 |
-| `group_reply_mode` | `"mention"`（仅 @回复）或 `"all"`（全部回复） |
+| `group_reply_mode` | `"mention"`（仅接收昵称提及）或 `"all"`（全部接收，由 AstrBot 与插件决定回复；普通消息不添加合成 @） |
 | `allowed_groups` | 群范围；优先填写 WeFlow 的群 session ID，也兼容完整群名。空列表沿用不限群的行为；修改后重启桥接器。 |
 | `astrbot_ob_url` | AstrBot aiocqhttp WebSocket 服务端地址 |
 
@@ -113,7 +113,7 @@ Web 控制面板：`http://127.0.0.1:8766`
 
 文本发送器使用已识别微信窗口的原生句柄，并在激活后和每次按键前确认微信仍在前台；激活或切群失败立即停止发送。完成按键后通过 WeFlow 查询目标会话，只有找到本次发送时间附近、正文匹配的 `isSend=1` 记录才日志确认文字已发送。OneBot 当前仍提前确认 API 请求，不能把 API 响应当成送达证据；搜索结果的目标会话校验和图片回读仍未完善。离线回归检查：`python -m unittest discover -s tests -v`。
 
-图片描述可使用 `image_caption_fallbacks` 按顺序尝试备用 OpenAI 兼容接口；每项包含 `api_base`、`api_key` 和 `model`。运行配置含凭据，只保存在已忽略的 `config.json` 中。AstrBot 主回复的备用模型与直接调用的看图、压缩备用模型需要分别配置；辅助调用适配见根目录的 `astrbot_plugin_qiuse_model_roles`。
+图片描述可使用 `image_caption_fallbacks` 按顺序尝试备用 OpenAI 兼容接口；每项包含 `api_base`、`api_key` 和 `model`。运行配置含凭据，只保存在已忽略的 `config.json` 中。AstrBot 主回复的备用模型与直接调用的看图、压缩备用模型需要分别配置；当前统一使用 AstrBot 原生 Provider 配置，不再维护独立模型角色插件。
 
 当前图片描述默认使用 qlsg Ollama 上的 `qwen2.5vl:3b`（具备 vision 能力）。Windows 桥接通过 SSH 本地转发访问 `http://127.0.0.1:61000`，不会将 Ollama 端口直接暴露到公网；`qwen3-embedding:0.6b` 仅用于向量检索，不能用于图片描述。视觉模型的实际响应速度和中文描述质量仍需在真实微信图片消息中继续验证。
 
