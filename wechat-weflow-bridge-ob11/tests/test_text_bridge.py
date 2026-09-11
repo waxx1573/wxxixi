@@ -332,6 +332,45 @@ class TextBridgeTests(unittest.TestCase):
         finally:
             os.unlink(image_path)
 
+    def test_group_image_and_following_text_share_the_same_buffer(self):
+        payload = b'wechat-image-bytes'
+        with tempfile.NamedTemporaryFile(delete=False) as image_file:
+            image_file.write(payload)
+            image_path = image_file.name
+        try:
+            with patch.object(bridge_core.threading, 'Timer'), \
+                 patch.object(self.bridge, '_fetch_wechat_image', return_value=image_path), \
+                 patch.object(bridge_core, 'caption_image_via_ollama', return_value=None), \
+                 patch.object(bridge_core, 'push_event', return_value=True) as push:
+                self.bridge.process_image_message(dict(self.data, content='[图片]', rawid='image-1'))
+                self.bridge.add_to_buffer(dict(self.data, content='@TestBot what is this'))
+                self.assertEqual(list(self.bridge.pending_buffers), ['group@chatroom_Tester'])
+                self.bridge.process_sender('group@chatroom_Tester')
+
+            event = push.call_args.args[0]
+            image = next(part for part in event['message'] if part['type'] == 'image')
+            self.assertEqual(base64.b64decode(image['data']['file'].removeprefix('base64://')), payload)
+            self.assertIn('what is this', event['raw_message'])
+        finally:
+            os.unlink(image_path)
+
+    def test_group_image_reschedules_an_existing_idle_buffer(self):
+        self.bridge.pending_buffers['group@chatroom_Tester'] = {
+            'messages': [], 'segments': [], 'timer': None, 'timer_version': 3,
+            'processing': False, 'contact': 'TestGroup', 'is_group': True,
+            'source_name': 'Tester', 'group_name': 'TestGroup',
+            'sender_in_group': 'Tester', 'session_id_data': 'group@chatroom',
+        }
+        with patch.object(bridge_core.threading, 'Timer') as timer, \
+             patch.object(self.bridge, '_fetch_wechat_image', return_value=None), \
+             patch.object(bridge_core, 'caption_image_via_ollama', return_value=None):
+            self.bridge.process_image_message(dict(self.data, content='[图片]', rawid='image-1'))
+
+        entry = self.bridge.pending_buffers['group@chatroom_Tester']
+        self.assertEqual(entry['timer_version'], 4)
+        self.assertIs(entry['timer'], timer.return_value)
+        timer.return_value.start.assert_called_once()
+
     def test_distinct_events_have_distinct_safe_integer_ids(self):
         events = [ob_protocol.make_message_event(
             kind, 123, [{'type':'text', 'data':{'text':'same text'}}], group_id=456)

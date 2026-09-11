@@ -591,10 +591,18 @@ class WeFlowBridge:
 
         talker_id = data.get("talkerId", "") or data.get("sessionId", "")
         is_group = bool(group_name) or "@chatroom" in session_id
+        sender_in_group = data.get("senderName", "") or data.get("sender", "") or source_name
+        if is_group and state.group_reply_mode == "batch" and group_name:
+            g_base = re.sub(r'\s*\(\d+\)\s*$', '', group_name).strip()
+            buffer_key = f"__batch__{g_base}"
+        elif is_group and sender_in_group:
+            buffer_key = f"{session_id}_{sender_in_group}"
+        else:
+            buffer_key = session_id or talker_id
 
         # 注册待处理的图片（ollama 完成前标记为 pending）
         img_event = threading.Event()
-        self._pending_image[talker_id] = {"caption": None, "event": img_event}
+        self._pending_image[buffer_key] = {"caption": None, "event": img_event}
 
         try:
             # 取图 + ollama 描述
@@ -613,12 +621,11 @@ class WeFlowBridge:
 
             # 注入图片描述到缓冲区
             with self.buffer_lock:
-                self._pending_image[talker_id] = {"caption": caption_text, "event": img_event}
+                self._pending_image[buffer_key] = {"caption": caption_text, "event": img_event}
 
                 # 批处理模式用群共享 key
                 if is_group and state.group_reply_mode == "batch" and group_name:
-                    g_base = re.sub(r'\s*\(\d+\)\s*$', '', group_name).strip()
-                    batch_key = f"__batch__{g_base}"
+                    batch_key = buffer_key
                     if batch_key in self.pending_buffers:
                         entry = self.pending_buffers[batch_key]
                         entry["messages"].insert(0, f'成员"{source_name}"在群"{group_name}"中对你说：[图片: {caption_text}]')
@@ -648,18 +655,27 @@ class WeFlowBridge:
                     timer.start()
                     self.pending_buffers[batch_key]["timer"] = timer
                     self.pending_buffers[batch_key]["timer_version"] = version
-                elif talker_id in self.pending_buffers:
+                elif buffer_key in self.pending_buffers:
                     # 已有文本在排队，注入图片上下文
-                    entry = self.pending_buffers[talker_id]
+                    entry = self.pending_buffers[buffer_key]
                     entry["messages"].insert(0, f"[图片: {caption_text}]")
                     if image_segment:
                         entry.setdefault("segments", []).append(image_segment)
                     entry["image_ready"] = True
                     log.info(f"📝 图片已注入待处理文本队列")
+                    if not entry.get("processing"):
+                        if entry.get("timer"):
+                            entry["timer"].cancel()
+                        entry["timer_version"] = entry.get("timer_version", 0) + 1
+                        version = entry["timer_version"]
+                        timer = threading.Timer(2, lambda v=version, sid=buffer_key: self.process_sender(sid, v))
+                        timer.daemon = True
+                        timer.start()
+                        entry["timer"] = timer
                 else:
                     # 没有文本排队，创建单条图片消息处理
                     log.info(f"📩 图片无文本跟随，直接处理")
-                    self.pending_buffers[talker_id] = {
+                    self.pending_buffers[buffer_key] = {
                         "messages": [f"[图片: {caption_text}]"],
                         "segments": [image_segment] if image_segment else [],
                         "timer": None,
@@ -673,11 +689,11 @@ class WeFlowBridge:
                         "sender_in_group": "",
                     }
                     version = 1
-                    timer = threading.Timer(2, lambda v=version, sid=talker_id: self.process_sender(sid, v))
+                    timer = threading.Timer(2, lambda v=version, sid=buffer_key: self.process_sender(sid, v))
                     timer.daemon = True
                     timer.start()
-                    self.pending_buffers[talker_id]["timer"] = timer
-                    self.pending_buffers[talker_id]["timer_version"] = version
+                    self.pending_buffers[buffer_key]["timer"] = timer
+                    self.pending_buffers[buffer_key]["timer_version"] = version
         finally:
             # 确保 Event 被设置
             img_event.set()
