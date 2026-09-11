@@ -159,7 +159,9 @@ class SemanticDecision:
 
     async def should_reply(self, event, config, context, history_messages, keywords, followup_eligible=False):
         signals = self._signals(event, keywords, followup_eligible)
-        for key in ("native_at", "reply_to_bot", "keyword", "followup"):
+        # A follow-up window is context evidence, not an unconditional bypass:
+        # an unrelated message such as "I am going to eat" must still be judged.
+        for key in ("native_at", "reply_to_bot", "keyword"):
             if signals[key]:
                 log.info(
                     "Spectre semantic decision: reply reason=%s group=%s sender=%s",

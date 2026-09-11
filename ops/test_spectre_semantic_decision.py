@@ -77,7 +77,6 @@ class SemanticDecisionTests(unittest.TestCase):
             (Event(mentioned=True), [], False),
             (Event(parts=[Part("reply", sender_id="bot")]), [], False),
             (Event(text="pipi look"), ["pipi"], False),
-            (Event(text="continue", message_id="4"), [], True),
         )
         for event, keywords, followup in cases:
             provider = Provider("skip")
@@ -96,6 +95,13 @@ class SemanticDecisionTests(unittest.TestCase):
         self.assertIn("previous", prompt)
         self.assertNotIn("current-copy", prompt)
         self.assertIn("alice", prompt)
+
+    def test_followup_window_is_context_for_model_not_a_bypass(self):
+        provider = Provider("skip")
+        event = Event(text="I am going to eat", message_id="followup")
+        self.assertFalse(asyncio.run(decide(SemanticDecision(), event, provider, followup=True)))
+        self.assertEqual(len(provider.calls), 1)
+        self.assertIn("In follow-up window: true", provider.calls[0]["prompt"])
 
     def test_skip_invalid_timeout_and_missing_provider_fail_closed(self):
         self.assertFalse(asyncio.run(decide(SemanticDecision(), Event(), Provider("skip"))))
