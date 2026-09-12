@@ -95,7 +95,7 @@ Web 控制面板：`http://127.0.0.1:8766`
 | `weflow_send_api` | WeFlow 发送消息 API 地址 |
 | `buffer_seconds` | 消息缓冲秒数，多条消息合并后统一推送 |
 | `web_port` | Web 控制面板端口 |
-| `group_reply_mode` | `"mention"`（仅接收昵称提及）或 `"all"`（全部接收，由 AstrBot 与插件决定回复；普通消息不添加合成 @） |
+| `group_reply_mode` | `"mention"`（仅接收昵称提及）、`"all"`（全部接收）或 `"batch"`（批量转发）；普通消息均不添加合成 @ |
 | `allowed_groups` | 群范围；优先填写 WeFlow 的群 session ID，也兼容完整群名。空列表沿用不限群的行为；修改后重启桥接器。 |
 | `astrbot_ob_url` | AstrBot aiocqhttp WebSocket 服务端地址 |
 
@@ -109,7 +109,7 @@ Web 控制面板：`http://127.0.0.1:8766`
 
 ## 发送模式
 
-本地兼容修复：已通过群范围与回复模式过滤的消息会携带 OneBot `at` 标记，唤醒 AstrBot 的模型管线；AstrBot 的群管理插件仍会独立检查白名单、运行级别和静默时间。OneBot ID 使用 SHA-256 确定性映射，群 ID 基于 WeFlow session ID，重启和群改名后保持一致。由旧随机哈希版本升级时，需要同步更新 AstrBot 插件中明确允许的群 ID。
+本地兼容修复：只有检测到真实昵称提及时才转换为 OneBot `at` 标记；`all` 与 `batch` 模式下的普通消息只转发原始内容，不合成唤醒。OneBot ID 使用 SHA-256 确定性映射，群 ID 基于 WeFlow session ID，重启和群改名后保持一致。由旧随机哈希版本升级时，需要同步更新 AstrBot 插件中明确允许的群 ID。
 
 文本发送器使用已识别微信窗口的原生句柄，并在激活后和每次按键前确认微信仍在前台；激活或切群失败立即停止发送。完成按键后通过 WeFlow 查询目标会话，只有找到本次发送时间附近、正文匹配的 `isSend=1` 记录才日志确认文字已发送。OneBot 当前仍提前确认 API 请求，不能把 API 响应当成送达证据；搜索结果的目标会话校验和图片回读仍未完善。离线回归检查：`python -m unittest discover -s tests -v`。
 

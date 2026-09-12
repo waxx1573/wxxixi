@@ -43,8 +43,9 @@ class UiaSender(BaseSender):
 
     WECHAT_TITLES = ["微信", "WeChat"]
     WECHAT_EXECUTABLE = r"C:\app\Weixin\Weixin.exe"
+    CONTROL_SEARCH_DEPTH = 24
 
-    def __init__(self, search_enabled: bool = True):
+    def __init__(self, search_enabled: bool = True, session_lookup=None):
         self._lock = threading.Lock()
         self._auto = None
         self._ready = False
@@ -57,6 +58,9 @@ class UiaSender(BaseSender):
         self._launch_attempted_at = 0.0
 
         self.search_enabled = search_enabled
+        self._session_lookup = session_lookup
+        self._target_contact = ""
+        self._target_session = ""
 
         self._init()
 
@@ -118,6 +122,8 @@ class UiaSender(BaseSender):
             return
         # UIA controls cannot be shared between the main thread and send workers.
         with self._auto.UIAutomationInitializerInThread():
+            self._target_contact = ""
+            self._target_session = ""
             self._find_window()
             self._ready = self._window is not None
             try:
@@ -218,26 +224,17 @@ class UiaSender(BaseSender):
         return False
 
     def _named_control(self, automation_id):
-        roots = [self._window]
-        # WeChat 4.x may render the active chat in a separate top-level window.
-        try:
-            roots.extend(
-                w for w in self._auto.GetRootControl().GetChildren()
-                if w is not self._window and (
-                    w.ClassName == "ChatSingleWindow" or
-                    (w.ClassName == "Chrome_WidgetWin_1" and "ChatSingleWindow" in (w.AutomationId or ""))
-                )
-            )
-        except Exception:
-            pass
-        for root in roots:
-            control = root.Control(AutomationId=automation_id, searchDepth=12)
-            if control.Exists(0.5):
-                return control
-        # New WeChat nests the chat pane below custom controls; search children
-        # explicitly when the top-level query does not cross that boundary.
+        # Title and editor must come from the same verified chat window.
+        root = self._window
+        control = root.Control(
+            AutomationId=automation_id, searchDepth=self.CONTROL_SEARCH_DEPTH
+        )
+        if control.Exists(0.5):
+            return control
+        # Observed Qt chat titles/editors are deeper than 14 UIA levels.
+        # Keep a bounded fallback for providers that skip custom views.
         def walk(parent, depth=0):
-            if depth > 14:
+            if depth >= self.CONTROL_SEARCH_DEPTH:
                 return None
             for child in parent.GetChildren():
                 if child.AutomationId == automation_id:
@@ -246,11 +243,44 @@ class UiaSender(BaseSender):
                 if found:
                     return found
             return None
-        for root in roots:
-            found = walk(root)
-            if found:
-                return found
-        return None
+        return walk(root)
+
+    def _matching_chat_windows(self, contact):
+        process_id = self._window.ProcessId
+        if not isinstance(process_id, int) or process_id <= 0:
+            return []
+        matches = []
+        lookup = getattr(self, "_session_lookup", None)
+        expected_session = lookup(contact) if lookup else None
+        for window in self._auto.GetRootControl().GetChildren():
+            is_chat = window.ClassName in ("mmui::ChatSingleWindow", "ChatSingleWindow")
+            is_chat = is_chat or (
+                window.ClassName == "Chrome_WidgetWin_1"
+                and (window.AutomationId or "").startswith("ChatSingleWindow")
+            )
+            if is_chat and window.ProcessId == process_id and window.Name == contact:
+                if expected_session and window.AutomationId != "ChatSingleWindow" + expected_session:
+                    raise RuntimeError("独立聊天窗口与目标微信会话 ID 不一致")
+                matches.append(window)
+        return matches
+
+
+    def _require_chat_target(self):
+        contact = getattr(self, "_target_contact", "")
+        if not contact:
+            return
+        title = self._named_control(
+            "title_h_view.title_left_v_view_.title_left_info_v_view_.big_title_line_h_view.current_chat_name_label"
+        )
+        title_name = str(getattr(title, "Name", "") or "") if title is not None else ""
+        if not (title_name == contact or title_name.startswith(contact + " ") or title_name.startswith(contact + "\n")):
+            raise RuntimeError("目标聊天标题已变化，已停止输入")
+        if self._window.ClassName not in ("mmui::MainWindow", "WeChatMainWndForPC"):
+            if self._window.Name != contact or title_name != contact:
+                raise RuntimeError("独立聊天窗口目标已变化，已停止输入")
+            session = getattr(self, "_target_session", "")
+            if session and self._window.AutomationId != "ChatSingleWindow" + session:
+                raise RuntimeError("独立聊天窗口会话 ID 已变化，已停止输入")
 
     def _session_list(self):
         """Locate the session list even when WeChat nests it below custom views."""
@@ -261,8 +291,10 @@ class UiaSender(BaseSender):
 
     def _send_keys(self, keys, control=None):
         self._require_foreground()
+        self._require_chat_target()
         if control is not None:
             self._require_focus(control)
+        self._require_foreground()
         self._auto.SendKeys(keys)
 
     # ================================================================
@@ -270,79 +302,46 @@ class UiaSender(BaseSender):
     # ================================================================
 
     def _switch_contact(self, contact: str) -> bool:
-        """
-        切换到指定联系人/群聊的聊天窗口。
-
-        只选择会话列表中的精确匹配项；不存在或重名时停止。
-        """
-        if not self._ensure_window():
+        """Use the main pane, clicking the exact session only when necessary."""
+        if not self._ensure_window() or not self._activate():
             return False
-        if not self._activate():
-            return False
-
         try:
+            if self._window.ClassName not in ("mmui::MainWindow", "WeChatMainWndForPC"):
+                return False
             sessions = self._session_list()
             if sessions is None or not sessions.Exists(1):
-                log.error("微信会话列表不可用，已停止发送")
                 return False
             matches = [item for item in sessions.GetChildren()
                        if item.AutomationId == "session_item_" + contact]
             if len(matches) != 1:
-                log.error("目标会话不唯一或不可见，已停止发送: %s", contact)
                 return False
-            item = matches[0]
-            self._require_foreground()
-            selection = item.GetSelectionItemPattern()
-            try:
-                selection.Select()
-            except Exception:
-                pass
-            if not item.SetFocus():
-                return False
-            # A single UIA click selects the session without opening a
-            # separate ChatSingleWindow. Do not send Enter: WeChat 4.x treats
-            # it as "open independent chat window".
-            item.Click()
-
             title_id = "title_h_view.title_left_v_view_.title_left_info_v_view_.big_title_line_h_view.current_chat_name_label"
-            title = editor = None
-            for _ in range(10):
-                time.sleep(0.2)
-                title = self._named_control(title_id)
-                editor = self._named_control("chat_input_field")
-                title_name = str(getattr(title, "Name", "") or "") if title is not None else ""
-                title_matches = title_name == contact or title_name.startswith(contact + " ") or title_name.startswith(contact + "\n")
-                if title is not None and title_matches and editor is not None:
-                    break
-            title_name = str(getattr(title, "Name", "") or "") if title is not None else ""
-            title_matches = title_name == contact or title_name.startswith(contact + " ") or title_name.startswith(contact + "\n")
-            if title is None or not title_matches or editor is None:
-                focused = self._auto.GetFocusedControl()
-                log.error(
-                    "目标会话或聊天输入框校验失败: %s (title=%r editor=%s focused=%r/%r)",
-                    contact,
-                    title.Name if title is not None else None,
-                    editor is not None,
-                    focused.Name if focused is not None else None,
-                    focused.AutomationId if focused is not None else None,
-                )
+            title = self._named_control(title_id)
+            editor = self._named_control("chat_input_field")
+            if title is None or title.Name != contact or editor is None:
+                self._require_foreground()
+                matches[0].Click()
+                for _ in range(5):
+                    time.sleep(0.2)
+                    title = self._named_control(title_id)
+                    editor = self._named_control("chat_input_field")
+                    if title is not None and title.Name == contact and editor is not None:
+                        break
+            if title is None or title.Name != contact or editor is None:
+                log.error("Main chat input unavailable; no child window opened: %s", contact)
                 return False
-            editor_hwnd = getattr(editor, "NativeWindowHandle", None)
-            if isinstance(editor_hwnd, int) and editor_hwnd:
-                self._active_hwnd = editor_hwnd
-            else:
-                self._active_hwnd = self._window.NativeWindowHandle
+            self._active_hwnd = self._window.NativeWindowHandle
             if not editor.SetFocus():
                 return False
-            if self._auto.GetFocusedControl().GetRuntimeId() != editor.GetRuntimeId():
-                log.error("聊天输入框未获得焦点: %s", contact)
-                return False
+            self._require_focus(editor)
             self._input_control = editor
-
-            log.info("已选择目标会话，等待输入框校验: %s", contact)
+            self._target_contact = contact
+            lookup = getattr(self, "_session_lookup", None)
+            self._target_session = lookup(contact) if callable(lookup) else ""
+            log.info("Main chat input verified: %s", contact)
             return True
         except Exception as exc:
-            log.error("切换联系人失败: %s: %s", type(exc).__name__, exc)
+            log.error("Main chat selection failed: %s: %s", type(exc).__name__, exc)
             return False
 
     # ================================================================

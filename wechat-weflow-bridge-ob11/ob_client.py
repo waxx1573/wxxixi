@@ -28,6 +28,8 @@ def _run_ob_client():
     try:
         _loop.run_until_complete(_ob_client_main())
     finally:
+        state.ob_client_started = False
+        state.ob_client_thread = None
         try:
             _loop.close()
         except Exception:

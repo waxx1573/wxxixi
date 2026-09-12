@@ -440,8 +440,8 @@ class WebHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/start":
             from main import _start_bridge
-            _start_bridge()
-            self.send_json({"ok": True})
+            started = _start_bridge()
+            self.send_json({"ok": bool(started)}, 200 if started else 409)
         elif self.path == "/stop":
             from main import _stop_bridge
             _stop_bridge()
@@ -456,10 +456,12 @@ class WebHandler(BaseHTTPRequestHandler):
             self.send_json({"ok": True})
         elif self.path == "/api/test-send":
             try:
+                from ob_protocol import _format_text_for_wechat
+
                 length = int(self.headers.get("Content-Length", 0))
                 payload = json.loads(self.rfile.read(length).decode("utf-8"))
                 contact = str(payload.get("contact", "")).strip()
-                text = str(payload.get("text", "")).strip()
+                text = _format_text_for_wechat(str(payload.get("text", "")))
                 if not contact or not text or len(text) > 2000:
                     self.send_json({"ok": False, "error": "invalid contact or text"}, 400)
                     return

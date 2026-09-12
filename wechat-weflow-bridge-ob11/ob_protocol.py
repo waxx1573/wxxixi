@@ -15,6 +15,7 @@ import os
 import tempfile
 import time
 import logging
+import secrets
 
 import requests
 from markdown_it import MarkdownIt
@@ -34,6 +35,18 @@ _group_text_tasks = {}
 _MARKDOWN_PARSER = MarkdownIt("commonmark", {"html": False}).enable(
     ["table", "strikethrough"]
 )
+
+
+def _clean_wechat_emphasis(state):
+    # CommonMark leaves CJK punctuation-adjacent emphasis as literal text.
+    # Escapes are still text_special here; code and link targets are untouched.
+    for block in state.tokens:
+        for token in block.children or []:
+            if token.type == "text":
+                token.content = token.content.replace("**", "").replace("＊＊", "")
+
+
+_MARKDOWN_PARSER.core.ruler.before("text_join", "wechat_emphasis", _clean_wechat_emphasis)
 
 
 def _render_inline_markdown(node):
@@ -59,24 +72,21 @@ def _render_list(node, depth=0):
     start = int(node.attrs.get("start", 1)) if ordered else 1
 
     for index, item in enumerate(node.children):
-        text_blocks = []
-        nested_lists = []
-        for child in item.children:
-            if child.type in ("bullet_list", "ordered_list"):
-                nested_lists.append(child)
-            else:
-                rendered = _render_markdown_block(child, depth + 1)
-                if rendered:
-                    text_blocks.append(rendered)
-
-        item_lines = "\n".join(text_blocks).splitlines() or [""]
         marker = f"{start + index}. " if ordered else "• "
         indent = "  " * depth
         continuation = "  " * (depth + 1)
-        lines.append(f"{indent}{marker}{item_lines[0]}")
-        lines.extend(f"{continuation}{line}" for line in item_lines[1:])
-        for nested in nested_lists:
-            lines.extend(_render_list(nested, depth + 1).splitlines())
+        started = False
+        for child in item.children:
+            if child.type in ("bullet_list", "ordered_list"):
+                lines.extend(_render_list(child, depth + 1).splitlines())
+            else:
+                rendered = _render_markdown_block(child, depth + 1)
+                if rendered:
+                    item_lines = rendered.splitlines()
+                    prefix = continuation if started else f"{indent}{marker}"
+                    lines.append(f"{prefix}{item_lines[0]}")
+                    lines.extend(f"{continuation}{line}" for line in item_lines[1:])
+                    started = True
     return "\n".join(lines)
 
 
@@ -90,8 +100,19 @@ def _render_table(node):
                     _render_inline_markdown(child) for child in cell.children
                 ).strip()
                 cells.append(value)
-            rows.append("｜".join(cells))
-    return "\n".join(rows)
+            rows.append(cells)
+    if not rows:
+        return ""
+    headers, *body = rows
+    if not body:
+        return "｜".join(headers)
+    return "\n\n".join(
+        "\n".join(
+            f"{headers[index] or f'列 {index + 1}'}：{value}"
+            for index, value in enumerate(row)
+        )
+        for row in body
+    )
 
 
 def _render_markdown_block(node, depth=0):
@@ -137,13 +158,20 @@ def _format_text_for_wechat(text):
         return value
 
     output = []
+    source_lines = value.splitlines()
     previous_end = None
     for child in root.children:
-        if previous_end is not None and child.map and child.map[0] > previous_end:
-            output.append("")
+        if previous_end is not None and child.map:
+            # List token ranges can include the blank line after the list.
+            trailing_blank = (
+                0 < previous_end <= len(source_lines)
+                and not source_lines[previous_end - 1].strip()
+            )
+            if child.map[0] > previous_end or trailing_blank:
+                output.append("")
         rendered = _render_markdown_block(child)
         if rendered:
-            output.extend(line.rstrip() for line in rendered.splitlines())
+            output.extend(rendered.splitlines())
         if child.map:
             previous_end = child.map[1]
 
@@ -240,7 +268,8 @@ async def _flush_group_text(contact):
     await asyncio.sleep(_GROUP_TEXT_COALESCE_SECONDS)
     texts = _group_text_pending.pop(contact, [])
     _group_text_tasks.pop(contact, None)
-    text = "\n".join(item for item in texts if item)
+    # Parse once after collection so fences and emphasis can span API calls.
+    text = _format_text_for_wechat("\n".join(item for item in texts if item))
     if text:
         log.info("[OB11] 合并普通群文字出站: %s (%d 段)", contact, len(texts))
         await _send_formatted_text(contact, text)
@@ -325,7 +354,7 @@ async def _handle_ob_api(data: dict):
                 for seg in normalized
             ):
                 texts = [
-                    _format_text_for_wechat(seg.get("data", {}).get("text", ""))
+                    seg.get("data", {}).get("text", "")
                     for seg in normalized
                 ]
                 texts = [text for text in texts if text]
@@ -498,6 +527,8 @@ def make_message_event(message_type: str, user_id: int, message: list,
         "time": int(time.time()),
         "self_id": state._self_id_int,
         "post_type": "message",
+        # One ID per emitted event, shared by all consumers and retries.
+        "message_id": secrets.randbits(52) + 1,
     }
     if message_type == "group":
         event["message_type"] = "group"

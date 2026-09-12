@@ -5,6 +5,7 @@
 """
 
 import logging
+import state
 from uia_sender import UiaSender
 
 log = logging.getLogger("ob11-bridge")
@@ -13,4 +14,4 @@ log = logging.getLogger("ob11-bridge")
 def create_sender():
     """创建 UIA 消息发送器"""
     log.info("使用 UIA 发送消息（纯键盘模拟）")
-    return UiaSender()
+    return UiaSender(session_lookup=lambda contact: state._contact_to_session.get(contact))

@@ -30,19 +30,25 @@ log = logging.getLogger("ob11-bridge")
 def _start_bridge():
     with state.run_lock:
         if state.running:
-            return
+            return True
+        old_client = state.ob_client_thread
+        if old_client and old_client.is_alive():
+            log.error("[Web] 旧 WebSocket 客户端仍在退出，拒绝重复启动")
+            return False
         state.running = True
     state.paused.clear()
     state.sender_instance = create_sender()
 
-    if not state.ob_client_started:
+    if not state.ob_client_started or not (state.ob_client_thread and state.ob_client_thread.is_alive()):
         t = threading.Thread(target=_run_ob_client, daemon=True, name="ob11-client")
-        t.start()
+        state.ob_client_thread = t
         state.ob_client_started = True
+        t.start()
 
     state.bridge_thread = threading.Thread(target=_bridge_loop, daemon=True, name="bridge")
     state.bridge_thread.start()
     log.info("[Web] 已启动")
+    return True
 
 
 def _stop_bridge():
@@ -65,18 +71,26 @@ def _stop_bridge():
         try:
             if _loop and _loop.is_running():
                 import asyncio
-                asyncio.run_coroutine_threadsafe(
+                close_future = asyncio.run_coroutine_threadsafe(
                     _ws.close(), _loop
                 )
+                close_future.result(timeout=3)
                 log.info("[Web] WebSocket 连接已关闭")
         except Exception as e:
             log.warning(f"[Web] 关闭 WebSocket 异常: {e}")
 
     state._ob_ws_ready.clear()
 
-    # 重置启动标记，让下次 start 能重新拉起 WebSocket 客户端线程
-    state.ob_client_started = False
-    state._ob_ws_loop = None
+    # 必须等待旧客户端退出，否则紧接着 /start 会产生两个反向 WS 客户端。
+    client_thread = state.ob_client_thread
+    if client_thread and client_thread.is_alive():
+        client_thread.join(timeout=6)
+    if client_thread and client_thread.is_alive():
+        log.warning("[Web] WebSocket 客户端未在超时内退出")
+    else:
+        state.ob_client_started = False
+        state.ob_client_thread = None
+        state._ob_ws_loop = None
 
     log.info("[Web] 已停止")
 
