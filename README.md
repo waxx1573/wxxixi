@@ -26,6 +26,6 @@ node --test astrbot_plugin_smart_core/tests/dashboard.test.cjs
 
 本仓库不提交本机配置、模型令牌、微信会话内容、数据库、日志或媒体缓存。
 
-`astrbot_plugin_self_learning` 在本地作为独立 Git 仓库维护，不嵌套提交到本仓库；其本地提交和上游同步应在独立仓库内处理。
+`astrbot_plugin_self_learning` 在本地作为独立 Git 仓库维护，不嵌套提交到本仓库。当前上游基线为 `c58fc16`，本地兼容提交为 `c144632`；完整提交已导出到 `ops/0001-fix-serialize-self-learning-memory-ingestion.patch`。在相同或兼容上游基线上使用 `git am` 应用，升级到新上游时先审查冲突和上游是否已提供等效实现。
 
 桥接器基于 [alingalingling/Akasha-WeChat](https://github.com/alingalingling/Akasha-WeChat)，其许可证保留在 `wechat-weflow-bridge-ob11/LICENSE`。
