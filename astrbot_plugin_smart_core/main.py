@@ -5,6 +5,7 @@ import time
 import copy
 import asyncio
 import random
+import re
 import urllib.request
 from collections import OrderedDict
 from pathlib import Path
@@ -48,11 +49,14 @@ class SmartFallbackProvider(ProviderOpenAIOfficial):
 class Main(star.Star):
     """Smart-style policy layer. AI generation remains AstrBot's responsibility."""
 
-    SMART_PERSONAS = {
-        "Smart-WeChat-Casual-v1": "casual",
-        "Smart-WeChat-Decision-v1": "decision",
-        "Smart-WeChat-Moderation-v1": "moderation",
-        "Smart-WeChat-ManageIntent-v1": "manage_intent",
+    # AstrBot binds one native Persona to a Bot. Smart's other prompts are
+    # internal classifiers and must not be registered as chat Personas.
+    CHAT_PERSONA_ID = "pipi"
+    LEGACY_PERSONA_IDS = {
+        "Smart-WeChat-Casual-v1",
+        "Smart-WeChat-Decision-v1",
+        "Smart-WeChat-Moderation-v1",
+        "Smart-WeChat-ManageIntent-v1",
     }
 
     def __init__(self, context: star.Context, config=None):
@@ -75,7 +79,6 @@ class Main(star.Star):
         self._group_config_path = Path("/AstrBot/data/config/astrbot_plugin_wechat_group_manager_config.json")
         self._group_names_path = Path(__file__).parent / "group_names.json"
         self._group_db_path = Path("/AstrBot/data/plugin_data/astrbot_plugin_wechat_group_manager/group_manager.sqlite3")
-        self._bridge_config_path = Path("/AstrBot/data/config/astrbot_plugin_wechat_bridge_config.json")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.get_config, ["GET"], "Get Smart Core config")
         context.register_web_api("/astrbot_plugin_smart_core/page/config", self.save_config, ["POST"], "Save Smart Core config")
         context.register_web_api("/astrbot_plugin_smart_core/page/groups", self.get_groups, ["GET"], "Get available WeChat groups")
@@ -85,25 +88,25 @@ class Main(star.Star):
 
     async def initialize(self):
         manager = self.context.persona_manager
-        for persona in await manager.get_all_personas():
-            if persona.persona_id in self.SMART_PERSONAS:
-                continue
-            await manager.delete_persona(persona.persona_id)
-            logger.warning("Smart Core: removed non-Smart persona %s", persona.persona_id)
-        existing = {item.persona_id for item in await manager.get_all_personas()}
-        for persona_id, filename in self.SMART_PERSONAS.items():
-            if persona_id in existing:
-                continue
-            prompt = self._read_prompt(filename)
+        personas = await manager.get_all_personas()
+        existing = {item.persona_id: item for item in personas}
+        if self.CHAT_PERSONA_ID not in existing:
+            # Preserve edits made to the old casual Persona during migration.
+            prompt = self._persona_prompt("Smart-WeChat-Casual-v1", self._read_prompt("casual"))
             await manager.create_persona(
-                persona_id=persona_id, system_prompt=prompt,
-                tools=None if filename == "casual" else [],
-                skills=None if filename == "casual" else [],
+                persona_id=self.CHAT_PERSONA_ID,
+                system_prompt=prompt,
+                tools=None,
+                skills=None,
             )
-            logger.info("Smart Core: registered native persona %s", persona_id)
+            logger.info("Smart Core: registered native chat persona %s", self.CHAT_PERSONA_ID)
+        for persona_id in self.LEGACY_PERSONA_IDS:
+            if persona_id in existing:
+                await manager.delete_persona(persona_id)
+                logger.info("Smart Core: removed legacy internal persona %s", persona_id)
         try:
             root = json.loads(self._astrbot_config_path.read_text(encoding="utf-8-sig"))
-            root.setdefault("provider_settings", {})["default_personality"] = "Smart-WeChat-Casual-v1"
+            root.setdefault("provider_settings", {})["default_personality"] = self.CHAT_PERSONA_ID
             self._astrbot_config_path.write_text(json.dumps(root, ensure_ascii=False, indent=2), encoding="utf-8")
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("Smart Core default persona update failed: %s", type(exc).__name__)
@@ -135,7 +138,25 @@ class Main(star.Star):
         value = getter() if callable(getter) else getattr(event, "message_str", "")
         return str(value or "").strip()
 
+    @classmethod
+    def _is_command_message(cls, event: AstrMessageEvent) -> bool:
+        """Let AstrBot command handlers run before Smart policy logic."""
+        text = cls._message_text(event)
+        if not text:
+            return False
+        return bool(
+            re.search(
+                r"(?:^|[\s:：])/(?!/)(?:[^\s]+)|(?:^|[\s:：])wx(?:[\s:：]|$)",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
     def _mentioned(self, event: AstrMessageEvent) -> bool:
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        bridge = raw.get("wxbridge") if isinstance(raw, dict) else None
+        if isinstance(bridge, dict) and bridge.get("synthetic_wakeup") is True:
+            return bridge.get("mentioned") is True
         self_ids = set()
         get_self_id = getattr(event, "get_self_id", None)
         if callable(get_self_id):
@@ -187,7 +208,8 @@ class Main(star.Star):
             logger.info("Smart Core: direct mention bypassed decision model")
             return True
         try:
-            decision_prompt = self._persona_prompt("Smart-WeChat-Decision-v1", self._decision_prompt)
+            # Decision is an internal classifier prompt, not a user-facing Persona.
+            decision_prompt = self._decision_prompt
             if not decision_prompt:
                 raise RuntimeError("decision prompt is unavailable")
             provider_id = str(settings.get("decision_provider_id", "")).strip()
@@ -239,8 +261,9 @@ class Main(star.Star):
         """Return detected groups from the running bridge, with saved groups as fallback."""
         detected = []
         try:
-            bridge_cfg = json.loads(self._bridge_config_path.read_text(encoding="utf-8-sig"))
-            base_url = str(bridge_cfg.get("bridge_url", "http://127.0.0.1:8766")).rstrip("/")
+            # The independent WeFlow bridge owns this endpoint; the removed
+            # AstrBot bridge plugin no longer provides a configuration file.
+            base_url = "http://127.0.0.1:8766"
             def fetch():
                 with urllib.request.urlopen(base_url + "/api/contacts", timeout=5) as response:
                     return json.loads(response.read().decode("utf-8"))
@@ -565,6 +588,9 @@ class Main(star.Star):
     @filter.on_llm_request()
     async def smart_policy(self, event: AstrMessageEvent, req) -> None:
         settings = self._settings()
+        if self._is_command_message(event):
+            logger.info("Smart Core: command bypassed smart policy")
+            return
         try:
             self.cooldown = max(0.0, float(settings.get("cooldown_seconds", self.cooldown)))
         except (TypeError, ValueError):
@@ -581,7 +607,7 @@ class Main(star.Star):
                 logger.info("Smart Core: unmanaged or disabled group stopped (%s)", group_id)
                 event.stop_event()
                 return
-            casual_prompt = self._persona_prompt("Smart-WeChat-Casual-v1", self._casual_prompt)
+            casual_prompt = self._persona_prompt(self.CHAT_PERSONA_ID, self._casual_prompt)
             if not casual_prompt:
                 logger.warning("Smart Core: casual prompt unavailable, request stopped")
                 event.stop_event()
@@ -608,7 +634,7 @@ class Main(star.Star):
             return
 
         current_prompt = req.system_prompt or ""
-        runtime_casual_prompt = self._persona_prompt("Smart-WeChat-Casual-v1", self._casual_prompt)
+        runtime_casual_prompt = self._persona_prompt(self.CHAT_PERSONA_ID, self._casual_prompt)
         casual_prompt = ""
         if group_id and runtime_casual_prompt and runtime_casual_prompt not in current_prompt:
             casual_prompt = runtime_casual_prompt + "\n\n"

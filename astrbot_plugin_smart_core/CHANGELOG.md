@@ -6,6 +6,13 @@
 - Run the Smart decision prompt before group replies in `smart` mode; failed decisions stop the request.
 - Let the global `smart` and `all` modes reach the LLM after group-manager safety checks.
 
+## 0.6.0 - One native Persona per Bot
+
+- Keep only the `pipi` chat Persona in AstrBot's native Persona manager.
+- Treat decision, moderation, and management-intent prompts as internal classifier resources.
+- Migrate the legacy casual Persona content to `pipi` and remove only the four legacy Smart Persona IDs.
+- Stop deleting unrelated user-created Personas during plugin initialization.
+
 ## 0.4.0 - WeChat prompt personas
 
 - Adapt Smart decision, moderation, casual-chat, and management-intent prompts for WeChat.

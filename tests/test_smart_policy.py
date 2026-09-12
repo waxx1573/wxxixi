@@ -139,6 +139,18 @@ class Request:
 
 
 class SmartDecisionTests(unittest.TestCase):
+    def test_smart_uses_one_native_chat_persona(self):
+        self.assertEqual(smart_module.Main.CHAT_PERSONA_ID, "pipi")
+        self.assertEqual(
+            smart_module.Main.LEGACY_PERSONA_IDS,
+            {
+                "Smart-WeChat-Casual-v1",
+                "Smart-WeChat-Decision-v1",
+                "Smart-WeChat-Moderation-v1",
+                "Smart-WeChat-ManageIntent-v1",
+            },
+        )
+
     def make_main(self, provider_text="casual"):
         provider = Provider(provider_text)
         main = smart_module.Main.__new__(smart_module.Main)

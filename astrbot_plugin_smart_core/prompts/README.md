@@ -2,17 +2,17 @@
 
 参考：qlsg `/opt/tgaa/prompt/` 的 `decision.md`、`moderation.md`、`casual.md`、`manage_intent.md`，2026-09-07 实际读取。上游为 [Smart_Group_Bot](https://github.com/Hamster-Prime/Smart_Group_Bot)。这是中文微信适配版，不是上游逐字副本。
 
-插件初始化时通过 AstrBot PersonaManager 添加四个人格，已有同名人格保持原样，避免覆盖管理页修改：
+这些文件是 Smart 的四类提示词资源，但 AstrBot 原生只注册一份面向群聊的 Bot 人格：
 
-| 人格 ID | 用途 |
+| 类型 | 文件 | 用途 |
 | --- | --- |
-| Smart-WeChat-Casual-v1 | 可选择的日常聊天人格 |
-| Smart-WeChat-Decision-v1 | 内部回复分类，只输出 skip/casual |
-| Smart-WeChat-Moderation-v1 | 内部审核分类，只输出 JSON |
-| Smart-WeChat-ManageIntent-v1 | 内部管理意图分类，只输出 JSON |
+| AstrBot Persona | `casual.md` | `pipi` 唯一的聊天人格 |
+| Smart 内部提示词 | `decision.md` | 回复分类，只输出 `skip/casual` |
+| Smart 内部提示词 | `moderation.md` | 审核分类，只输出 JSON |
+| Smart 内部提示词 | `manage_intent.md` | 管理意图分类，只输出 JSON |
 
-后三项禁止配置成面向群成员的聊天人格。它们禁用工具和技能；其中 Decision 已由 Smart Core 在 `smart` 模式下实际调用，Moderation 和 ManageIntent 仍作为后续功能的提示词资源。
+后三项禁止配置成面向群成员的聊天人格。它们由 Smart Core 在需要时作为分类器的 `system_prompt` 使用；不能绑定到会话，也不应出现在 AstrBot 的人格选择列表中。
 
 微信版不保留 Telegram 身份标记和处罚动作，不使用 [[SPLIT]] 私有协议，不推断所有者身份，不把普通群文字当作群公告。知识库、记忆、工具和权限以 AstrBot 实际能力为准。
 
-初始化不更改默认人格或其他会话绑定。微信群请求由 Smart Core 直接注入 Casual 提示词，因此不依赖会话手动绑定；仍需通过真实微信群结果及服务端证据验收，不能用静态检查代替真实消息验收。
+初始化只维护 `pipi` 这一份原生人格：若发现旧版 `Smart-WeChat-Casual-v1`，先迁移其已编辑内容；随后删除旧的四个 Smart 人格记录，并把默认人格指向 `pipi`。不会删除其他用户人格，也不会覆盖已经存在的 `pipi`。微信群请求读取 `pipi` 的当前内容；内部分类提示词仍来自插件资源文件。
