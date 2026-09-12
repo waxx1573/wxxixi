@@ -2,8 +2,6 @@
   "platform_names": {"description": "AstrBot 平台实例 ID 或适配器类型", "type": "list", "items": {"type": "string"}, "default": ["waxx", "aiocqhttp"]},
   "allowed_group_ids": {"description": "已认证的稳定群 ID", "type": "list", "items": {"type": "string"}, "default": []},
   "bootstrap_group_names": {"description": "仅用于 capture 引导的群名", "type": "list", "items": {"type": "string"}, "default": ["记录"]},
-  "administrator_ids": {"description": "有权执行 /wx 的稳定发送者 ID；display_only 身份不得加入", "type": "list", "items": {"type": "string"}, "default": []},
-  "group_admin_whitelist": {"description": "每群管理员白名单，格式 group_id=user_id；机器人 bot_self_ids 自动拥有管理权限", "type": "list", "items": {"type": "string"}, "default": []},
   "bot_self_ids": {"description": "机器人账号的平台用户 ID", "type": "list", "items": {"type": "string"}, "default": ["900000000000000001"]},
   "default_run_level": {"description": "capture、shadow、assisted 或 active", "type": "string", "default": "capture"},
   "reply_mode": {"description": "mention 或 keyword", "type": "string", "default": "mention"},
@@ -12,9 +10,10 @@
   "max_messages_per_window": {"description": "刷屏窗口消息阈值", "type": "int", "default": 6},
   "flood_window_seconds": {"description": "刷屏检测窗口秒数", "type": "int", "default": 10},
   "blocked_words": {"description": "进入人工处理的禁词", "type": "list", "items": {"type": "string"}, "default": []},
+  "blocked_regexes": {"description": "进入人工处理的正则规则；可填字符串，或 {id, pattern}", "type": "list", "items": {"type": "object"}, "default": []},
   "ad_domains": {"description": "进入人工处理的广告域名", "type": "list", "items": {"type": "string"}, "default": []},
   "rules_text": {"description": "默认群规", "type": "string", "default": "请友善交流，不刷屏，不发布未经确认的广告和风险链接。"},
-  "announcement_enabled": {"description": "允许管理员发送指定群公告", "type": "bool", "default": true},
-  "announcement_max_length": {"description": "单条公告最大字符数", "type": "int", "default": 1000},
-  "announcement_cooldown_seconds": {"description": "同一管理员对同一目标群的公告冷却秒数", "type": "int", "default": 30}
+  "style_learning_enabled": {"description": "按群学习表达风格（只保存风格结果）", "type": "bool", "default": false},
+  "style_batch_size": {"description": "每批有效发言数（至少两名成员）", "type": "int", "default": 30},
+  "style_provider_id": {"description": "用于提炼风格的现有聊天 Provider ID", "type": "string", "default": ""}
 }

@@ -17,6 +17,8 @@ class Decision:
     reason: str = ""
     reply: str = ""
     category: str = ""
+    rule_id: str = ""
+    confidence: float = 0.0
 
 
 class Store:
@@ -32,7 +34,6 @@ class Store:
         CREATE TABLE IF NOT EXISTS message_window(group_id TEXT NOT NULL,sender_id TEXT NOT NULL,content_hash TEXT NOT NULL,seen_at REAL NOT NULL);
         CREATE INDEX IF NOT EXISTS message_window_idx ON message_window(group_id,sender_id,seen_at);
         CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY AUTOINCREMENT,group_id TEXT NOT NULL,actor_id TEXT NOT NULL,action TEXT NOT NULL,result TEXT NOT NULL,detail TEXT NOT NULL,created_at REAL NOT NULL);
-        CREATE TABLE IF NOT EXISTS announcements(id INTEGER PRIMARY KEY AUTOINCREMENT,target_group_id TEXT NOT NULL,actor_id TEXT NOT NULL,content_hash TEXT NOT NULL,result TEXT NOT NULL,detail TEXT NOT NULL,created_at REAL NOT NULL);
         """)
         self.db.commit()
 
@@ -107,23 +108,6 @@ class Store:
         self.db.execute("INSERT INTO audit(group_id,actor_id,action,result,detail,created_at) VALUES(?,?,?,?,?,?)", (group_id, actor, action, result, detail[:1000], time.time()))
         self.db.commit()
 
-    def announcement_recent(self, actor: str, target_group: str, cooldown_seconds: int) -> bool:
-        cutoff = time.time() - max(0, cooldown_seconds)
-        row = self.db.execute(
-            "SELECT 1 FROM announcements WHERE actor_id=? AND target_group_id=? AND result='accepted' AND created_at>=? LIMIT 1",
-            (actor, target_group, cutoff),
-        ).fetchone()
-        return row is not None
-
-    def record_announcement(self, actor: str, target_group: str, content: str, result: str, detail: str = "") -> None:
-        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-        self.db.execute(
-            "INSERT INTO announcements(target_group_id,actor_id,content_hash,result,detail,created_at) VALUES(?,?,?,?,?,?)",
-            (target_group, actor, digest, result, detail[:1000], time.time()),
-        )
-        self.db.commit()
-
-
 class Engine:
     def __init__(self, store: Store, config: dict) -> None:
         self.store, self.config = store, config
@@ -133,13 +117,28 @@ class Engine:
             folded = text.casefold()
             for word in [str(item).casefold() for item in self.config.get("blocked_words", []) if str(item).strip()]:
                 if word in folded:
-                    return Decision("review", f"命中规则关键词：{word}", category="blocked_word")
+                    return Decision("review", f"命中规则关键词：{word}", category="blocked_word", rule_id=f"blocked_word:{word}", confidence=1.0)
+            for index, item in enumerate(self.config.get("blocked_regexes", []), 1):
+                if isinstance(item, dict):
+                    pattern = str(item.get("pattern", "")).strip()
+                    rule_id = str(item.get("id", f"blocked_regex:{index}")).strip()
+                else:
+                    pattern = str(item).strip()
+                    rule_id = f"blocked_regex:{index}"
+                if not pattern:
+                    continue
+                try:
+                    matched = re.search(pattern, text, re.I) is not None
+                except re.error:
+                    continue
+                if matched:
+                    return Decision("review", f"命中正则规则：{rule_id}", category="blocked_regex", rule_id=rule_id, confidence=1.0)
             domains = [str(item).casefold() for item in self.config.get("ad_domains", []) if str(item).strip()]
             for domain in URL_RE.findall(text):
                 if any(domain.casefold() == item or domain.casefold().endswith("." + item) for item in domains):
-                    return Decision("review", f"命中广告域名：{domain}", category="advertising")
+                    return Decision("review", f"命中广告域名：{domain}", category="advertising", rule_id="advertising_domain", confidence=1.0)
             count, repeat = self.store.count_messages(group, sender, text, int(self.config.get("flood_window_seconds", 10)))
             if count > int(self.config.get("max_messages_per_window", 6)) or repeat >= 3:
-                return Decision("review", f"疑似刷屏：窗口消息={count}，重复={repeat}", category="flood")
+                return Decision("review", f"疑似刷屏：窗口消息={count}，重复={repeat}", category="flood", rule_id="flood_rate_limit", confidence=0.95)
         keyword = self.store.keyword(group, text)
         return Decision("keyword", f"命中关键词：{keyword[0]}", reply=keyword[1]) if keyword else Decision("none")

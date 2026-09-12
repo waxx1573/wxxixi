@@ -12,7 +12,8 @@ from astrbot.api.platform import MessageType
 from astrbot.core.utils.astrbot_path import get_astrbot_data_path
 
 from .core import Decision, Engine, RUN_LEVELS, Store
-from .announcement import parse_announcement
+from .media_adapter import materialize_wechat_images
+from .group_style import GroupStyle
 
 
 class Main(star.Star):
@@ -22,6 +23,7 @@ class Main(star.Star):
         root = Path(get_astrbot_data_path()) / "plugin_data" / "astrbot_plugin_wechat_group_manager"
         self.store = Store(root / "group_manager.sqlite3")
         self.engine = Engine(self.store, self.config)
+        self.group_style = GroupStyle(root / "group_styles", self.config.get("style_batch_size", 30))
         self._smart_config_path = Path(get_astrbot_data_path()) / "astrbot_plugin_smart_core.json"
         self._config_path = (
             Path(get_astrbot_data_path())
@@ -100,42 +102,17 @@ class Main(star.Star):
         return isinstance(raw, Mapping) and bool((raw.get("wxbridge") or {}).get("is_self"))
 
     def _is_admin(self, event: AstrMessageEvent, group: str) -> bool:
-        """Resolve global and per-group Smart Core administrators.
-
-        The bot identity is always an administrator for internal operations;
-        human administrators must be explicitly listed.
-        """
-        actor = self._sid(event)
-        admins = self._set("administrator_ids")
-        bot_ids = self._set("bot_self_ids")
-        group_admins = self._set("group_admin_whitelist")
+        """Use the identity assigned by AstrBot, never a second allowlist."""
         try:
-            saved = json.loads(self._config_path.read_text(encoding="utf-8-sig"))
-            for key, target in (
-                ("administrator_ids", admins),
-                ("bot_self_ids", bot_ids),
-                ("group_admin_whitelist", group_admins),
-            ):
-                value = saved.get(key, [])
-                if isinstance(value, str):
-                    value = value.replace(";", ",").split(",")
-                target.update(str(item).strip() for item in value if str(item).strip())
-        except (OSError, ValueError, TypeError):
-            pass
-        if actor in bot_ids or actor in admins:
-            return True
-        for item in group_admins:
-            if "=" in item:
-                group_id, user_id = item.split("=", 1)
-            elif ":" in item:
-                group_id, user_id = item.split(":", 1)
-            else:
-                continue
-            if group_id.strip() == group and user_id.strip() == actor:
-                return True
-        return False
+            return event.is_admin() is True
+        except Exception:
+            return False
 
     def _mentioned(self, event: AstrMessageEvent) -> bool:
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        bridge = raw.get("wxbridge") if isinstance(raw, Mapping) else None
+        if isinstance(bridge, Mapping) and bridge.get("synthetic_wakeup") is True:
+            return bridge.get("mentioned") is True
         for part in event.get_messages():
             if type(part).__name__.lower() in {"at", "mention"}:
                 target = str(getattr(part, "qq", None) or getattr(part, "target", None) or getattr(part, "user_id", ""))
@@ -187,7 +164,15 @@ class Main(star.Star):
             return
         command = parts[1] if len(parts) > 1 else "状态"
         try:
-            if command == "状态":
+            if command == "风格":
+                key = str(event.get_platform_id()) + ":" + group
+                action = parts[2] if len(parts) > 2 else "查看"
+                if action in {"开启", "暂停", "清空"}:
+                    self.group_style.control(key, action)
+                elif action != "查看":
+                    raise ValueError("用法：/wx 风格 查看、开启、暂停或清空")
+                yield event.plain_result(self.group_style.status(key))
+            elif command == "状态":
                 yield event.plain_result(f"级别={state['run_level']}；模式={state['reply_mode']}；静默={state['quiet_start']}-{state['quiet_end']}；待处理={len(self.store.pending(group))}；群ID={group}")
             elif command in {"暂停", "关闭"}:
                 self.store.set_state(group, "run_level", "capture")
@@ -220,55 +205,12 @@ class Main(star.Star):
             elif command in {"确认", "忽略", "误报"}:
                 status = {"确认": "confirmed", "忽略": "ignored", "误报": "false_positive"}[command]
                 yield event.plain_result(f"事件更新={self.store.resolve(group, int(parts[2].lstrip('#')), status)}")
-            elif command == "公告":
-                if not bool(self.config.get("announcement_enabled", True)):
-                    raise ValueError("公告功能当前已停用")
-                targets, content = parse_announcement(
-                    text,
-                    group,
-                    self._set("allowed_group_ids"),
-                    max_length=int(self.config.get("announcement_max_length", 1000)),
-                )
-                cooldown = int(self.config.get("announcement_cooldown_seconds", 30))
-                results: list[str] = []
-                for target in targets:
-                    if self.store.announcement_recent(actor, target, cooldown):
-                        self.store.audit(group, actor, "announcement", "denied", f"target={target}; cooldown")
-                        results.append(f"{target}: 冷却中")
-                        continue
-                    try:
-                        result = await self._send_announcement(event, target, content)
-                        detail = json.dumps(result, ensure_ascii=False, default=str)[:900]
-                        self.store.record_announcement(actor, target, content, "accepted", detail)
-                        self.store.audit(group, actor, "announcement", "accepted", f"target={target}; {detail}")
-                        results.append(f"{target}: 已提交")
-                    except Exception as exc:
-                        self.store.record_announcement(actor, target, content, "failed", str(exc))
-                        self.store.audit(group, actor, "announcement", "failed", f"target={target}; {exc}")
-                        results.append(f"{target}: 失败({exc})")
-                yield event.plain_result("公告结果：" + "；".join(results))
             else:
-                yield event.plain_result("命令：/wx 状态|公告 <稳定群ID|当前|全部> <内容>|暂停|开启|级别 capture|shadow|assisted|active|模式 mention|keyword|静默 HH:MM HH:MM|群规|设置群规|关键词 添加/删除|待处理|确认/忽略/误报")
+                yield event.plain_result("命令：/wx 状态|暂停|开启|级别 capture|shadow|assisted|active|模式 mention|keyword|静默 HH:MM HH:MM|群规|设置群规|关键词 添加/删除|待处理|确认/忽略/误报")
             self.store.audit(group, actor, command, "success", text)
         except (ValueError, IndexError) as exc:
             self.store.audit(group, actor, command, "failed", str(exc))
             yield event.plain_result(f"命令失败：{exc}")
-
-    async def _send_announcement(self, event: AstrMessageEvent, target: str, content: str):
-        """Use AstrBot's native OneBot action so the bridge owns transport."""
-        bot = getattr(event, "bot", None)
-        api = getattr(bot, "api", None)
-        call_action = getattr(api, "call_action", None)
-        if not callable(call_action):
-            raise RuntimeError("当前平台没有可用的 OneBot API")
-        result = await call_action(
-            "send_group_msg_verified",
-            group_id=int(target),
-            message=[{"type": "text", "data": {"text": content}}],
-        )
-        if isinstance(result, dict) and result.get("retcode", 0) not in (0, None):
-            raise RuntimeError(f"OneBot retcode={result.get('retcode')}")
-        return result
 
     @filter.event_message_type(filter.EventMessageType.ALL, priority=10000)
     async def on_group_message(self, event: AstrMessageEvent):
@@ -313,6 +255,12 @@ class Main(star.Star):
                 event.stop_event()
             return
         moderation_enabled = bool(smart_settings.get("moderation_enabled", True))
+        try:
+            resolved = await materialize_wechat_images(event)
+            if resolved:
+                logger.info("WXGM materialized %s bridge images for plugins", resolved)
+        except Exception as exc:
+            logger.warning("WXGM bridge image conversion failed: %s", type(exc).__name__)
         moderation_level = str(smart_group.get("moderation", "standard")) if smart_group else "standard"
         decision = self.engine.evaluate(group, sender, text, moderation_enabled=moderation_enabled and moderation_level != "off")
         if decision.action == "review":
@@ -325,7 +273,33 @@ class Main(star.Star):
             yield event.plain_result(decision.reply)
             event.stop_event()
             return
+        if self.config.get("style_learning_enabled", False):
+            key = str(event.get_platform_id()) + ":" + group
+            provider_id = str(self.config.get("style_provider_id", "")).strip()
+            if provider_id:
+                async def generate(prompt):
+                    result = await self.context.llm_generate(
+                        chat_provider_id=provider_id, prompt=prompt,
+                        system_prompt="仅提炼聊天表达风格。输出要求的 JSON，不调用工具。",
+                    )
+                    return result.completion_text
+                self.group_style.observe(key, sender, text,
+                    getattr(event.message_obj, "message_id", None), generate)
         smart_mode = str(smart_settings.get("reply_mode", "smart"))
         if self._allow_llm(state["reply_mode"], smart_mode, self._mentioned(event)):
             return
         event.stop_event()
+
+    @filter.on_llm_request()
+    async def inject_group_style(self, event: AstrMessageEvent, req):
+        if not self.config.get("style_learning_enabled", False) or not self._platform_allowed(event):
+            return
+        group = self._gid(event)
+        if not group or group not in self._set("allowed_group_ids"):
+            return
+        profile = self.group_style.prompt(str(event.get_platform_id()) + ":" + group)
+        if profile and "[本群表达风格]" not in (req.system_prompt or ""):
+            req.system_prompt = (req.system_prompt or "") + profile
+
+    async def terminate(self):
+        await self.group_style.close()
