@@ -1,0 +1,10 @@
+--- a/main.py
++++ b/main.py
+@@ -878,2 +878,7 @@
+         event = unwrap_event(event)
++        # LLM tool calls must enforce AstrBot native administrator identity.
++        is_admin = getattr(event, "is_admin", None)
++        if not callable(is_admin) or is_admin() is not True:
++            yield "无权限：只有 AstrBot 管理员可以手动收录表情包。"
++            return
+         try:

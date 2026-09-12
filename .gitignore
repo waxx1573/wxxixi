@@ -6,6 +6,8 @@ __pycache__/
 config.json
 wechat-weflow-bridge-ob11/config.json
 wechat-weflow-bridge-ob11/wechat_images/
+astrbot_plugin_self_learning/
+ops/pipi-self-learning-config.json
 .pytest_cache/
 .mypy_cache/
 .coverage
