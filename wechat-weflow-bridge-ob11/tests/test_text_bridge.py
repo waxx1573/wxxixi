@@ -781,6 +781,34 @@ class TextBridgeTests(unittest.TestCase):
             self.assertTrue(sender._switch_contact('TestGroup'))
         target.Click.assert_not_called()
 
+    def test_updated_wechat_chat_title_path_is_supported(self):
+        sender = self.contact_sender()
+        target = Mock(AutomationId='session_item_TestGroup')
+        sender._window.ListControl.return_value.GetChildren.return_value = [target]
+        title = Mock(Name='TestGroup')
+        title.Exists.return_value = True
+        editor = Mock()
+        editor.Exists.return_value = True
+        editor.SetFocus.return_value = True
+        editor.GetRuntimeId.return_value = [9]
+        controls = {
+            sender.CHAT_TITLE_AUTOMATION_IDS[0]: title,
+            'chat_input_field': editor,
+        }
+
+        def control(**kwargs):
+            return controls[kwargs['AutomationId']]
+
+        sender._window.Control.side_effect = control
+        sender._auto.GetFocusedControl.return_value = editor
+        with patch('uia_sender.time.sleep'):
+            self.assertTrue(sender._switch_contact('TestGroup'))
+        sender._window.ListControl.assert_called_once_with(
+            AutomationId='session_list', searchDepth=sender.CONTROL_SEARCH_DEPTH
+        )
+        target.Click.assert_not_called()
+        editor.SetFocus.assert_called_once()
+
     def test_missing_or_duplicate_session_never_types(self):
         for items in ([], [Mock(AutomationId='session_item_TestGroup')] * 2):
             sender = self.contact_sender()
@@ -809,7 +837,8 @@ class TextBridgeTests(unittest.TestCase):
         title, editor = Mock(Name='TestGroup'), Mock()
         editor.GetRuntimeId.return_value = [9]
         sender._auto.GetFocusedControl.return_value = editor
-        sender._named_control = Mock(side_effect=[None, None, title, editor])
+        sender._chat_title_control = Mock(side_effect=[None, title])
+        sender._named_control = Mock(return_value=editor)
         with patch('uia_sender.time.sleep'):
             self.assertTrue(sender._switch_contact('TestGroup'))
         item.Click.assert_called_once()
@@ -820,6 +849,7 @@ class TextBridgeTests(unittest.TestCase):
         sender = self.contact_sender()
         item = Mock(AutomationId='session_item_TestGroup')
         sender._window.ListControl.return_value.GetChildren.return_value = [item]
+        sender._chat_title_control = Mock(return_value=None)
         sender._named_control = Mock(return_value=None)
         with patch('uia_sender.time.sleep'):
             self.assertFalse(sender._switch_contact('TestGroup'))

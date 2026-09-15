@@ -44,6 +44,11 @@ class UiaSender(BaseSender):
     WECHAT_TITLES = ["微信", "WeChat"]
     WECHAT_EXECUTABLE = r"C:\app\Weixin\Weixin.exe"
     CONTROL_SEARCH_DEPTH = 24
+    CHAT_TITLE_AUTOMATION_IDS = (
+        "content_view.top_content_view.title_h_view.left_v_view.left_content_v_view.left_ui_.big_title_line_h_view.current_chat_name_label",
+        "title_h_view.title_left_v_view_.title_left_info_v_view_.big_title_line_h_view.current_chat_name_label",
+    )
+    CHAT_TITLE_AUTOMATION_SUFFIX = ".current_chat_name_label"
 
     def __init__(self, search_enabled: bool = True, session_lookup=None):
         self._lock = threading.Lock()
@@ -264,14 +269,35 @@ class UiaSender(BaseSender):
                 matches.append(window)
         return matches
 
+    def _chat_title_control(self):
+        """Find the current chat title across known and bounded UIA layouts."""
+        for automation_id in self.CHAT_TITLE_AUTOMATION_IDS:
+            title = self._named_control(automation_id)
+            if title is not None:
+                return title
+
+        root = self._window
+
+        def walk(parent, depth=0):
+            if depth >= self.CONTROL_SEARCH_DEPTH:
+                return None
+            for child in parent.GetChildren():
+                automation_id = getattr(child, "AutomationId", "")
+                if (isinstance(automation_id, str)
+                        and automation_id.endswith(self.CHAT_TITLE_AUTOMATION_SUFFIX)):
+                    return child
+                found = walk(child, depth + 1)
+                if found:
+                    return found
+            return None
+
+        return walk(root)
 
     def _require_chat_target(self):
         contact = getattr(self, "_target_contact", "")
         if not contact:
             return
-        title = self._named_control(
-            "title_h_view.title_left_v_view_.title_left_info_v_view_.big_title_line_h_view.current_chat_name_label"
-        )
+        title = self._chat_title_control()
         title_name = str(getattr(title, "Name", "") or "") if title is not None else ""
         if not (title_name == contact or title_name.startswith(contact + " ") or title_name.startswith(contact + "\n")):
             raise RuntimeError("目标聊天标题已变化，已停止输入")
@@ -284,7 +310,9 @@ class UiaSender(BaseSender):
 
     def _session_list(self):
         """Locate the session list even when WeChat nests it below custom views."""
-        sessions = self._window.ListControl(AutomationId="session_list", searchDepth=12)
+        sessions = self._window.ListControl(
+            AutomationId="session_list", searchDepth=self.CONTROL_SEARCH_DEPTH
+        )
         if sessions.Exists(0.5):
             return sessions
         return self._named_control("session_list")
@@ -315,15 +343,14 @@ class UiaSender(BaseSender):
                        if item.AutomationId == "session_item_" + contact]
             if len(matches) != 1:
                 return False
-            title_id = "title_h_view.title_left_v_view_.title_left_info_v_view_.big_title_line_h_view.current_chat_name_label"
-            title = self._named_control(title_id)
+            title = self._chat_title_control()
             editor = self._named_control("chat_input_field")
             if title is None or title.Name != contact or editor is None:
                 self._require_foreground()
                 matches[0].Click()
                 for _ in range(5):
                     time.sleep(0.2)
-                    title = self._named_control(title_id)
+                    title = self._chat_title_control()
                     editor = self._named_control("chat_input_field")
                     if title is not None and title.Name == contact and editor is not None:
                         break
