@@ -1,0 +1,7 @@
+FROM soulter/astrbot@sha256:cf271483d2f03d2220b2c1ec5574747f4ebbdba27396421ef2e785474255856e
+
+COPY runtime-python-requirements.txt /tmp/astrbot-runtime-requirements.txt
+COPY disable_openai_sdk_retries.py /tmp/disable_openai_sdk_retries.py
+RUN uv pip install --system -r /tmp/astrbot-runtime-requirements.txt \
+    && python /tmp/disable_openai_sdk_retries.py \
+    && python -m playwright install --with-deps chromium chromium-headless-shell

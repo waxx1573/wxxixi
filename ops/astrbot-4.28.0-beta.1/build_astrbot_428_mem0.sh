@@ -8,12 +8,13 @@ image=astrbot-goofish:4.28.0-playwright-sensevoice-mem0
 
 test -f "$dockerfile"
 test -f "$root/runtime-python-requirements.txt"
+test -f "$root/disable_openai_sdk_retries.py"
 test -f "$validator"
 test -f "$root/verify_astrbot_image_packages.py"
 test -f "$root/test_mem0_takeover.py"
 test -d "$root/data/plugins/astrbot_plugin_self_learning"
-# Only two reviewed build inputs; never include data/, configs or backups.
-tar -C "$root" -cf - Dockerfile.astrbot-goofish runtime-python-requirements.txt | docker build --pull=false -f Dockerfile.astrbot-goofish -t "$image" -
+# Only reviewed build inputs; never include data/, configs or backups.
+tar -C "$root" -cf - Dockerfile.astrbot-goofish runtime-python-requirements.txt disable_openai_sdk_retries.py | docker build --pull=false -f Dockerfile.astrbot-goofish -t "$image" -
 docker run --rm --network none -i -e MEM0_TELEMETRY=false --entrypoint python "$image" - < "$validator"
 docker run --rm --network none --entrypoint uv "$image" pip check
 python3 "$root/verify_astrbot_image_packages.py" "$image"

@@ -27,5 +27,25 @@ old_source = json.loads(subprocess.check_output(["docker", "exec", "astrbot", "p
 new_source = json.loads(subprocess.check_output(["docker", "run", "--rm", "--network", "none", "--entrypoint", "python", sys.argv[1], "-c", source_code], text=True))
 differences = sorted(name for name in old_source.keys() | new_source.keys() if old_source.get(name) != new_source.get(name))
 print("source_preservation", json.dumps({"files": len(old_source), "differences": differences}))
+allowed_provider_patch = [
+    "astrbot/core/config/default.py",
+    "astrbot/core/provider/sources/openai_source.py",
+]
+if differences == allowed_provider_patch:
+    retry_code = r'''import json,pathlib
+p=pathlib.Path("/AstrBot/astrbot/core/provider/sources/openai_source.py")
+c=pathlib.Path("/AstrBot/astrbot/core/config/default.py")
+print(json.dumps({
+    "clients":p.read_text(encoding="utf-8").count("max_retries=self.openai_sdk_max_retries,"),
+    "config":p.read_text(encoding="utf-8").count('provider_config.get("openai_sdk_max_retries", 2)'),
+    "schema":c.read_text(encoding="utf-8").count('"openai_sdk_max_retries": {'),
+}))'''
+    retry_state = json.loads(subprocess.check_output(
+        ["docker", "run", "--rm", "--network", "none", "--entrypoint", "python", sys.argv[1], "-c", retry_code],
+        text=True,
+    ))
+    if retry_state == {"clients": 2, "config": 1, "schema": 1}:
+        print("reviewed_source_patch", "OpenAI SDK retries are provider-configurable")
+        differences = []
 if differences:
     raise SystemExit("candidate core differs from runtime; review actual source baseline before switching")

@@ -1,5 +1,6 @@
 import os
 from importlib.metadata import version
+from pathlib import Path
 
 os.environ["MEM0_TELEMETRY"] = "false"
 
@@ -13,6 +14,11 @@ import qdrant_client
 from playwright.sync_api import sync_playwright
 
 assert astrbot.__version__ == "4.28.0", astrbot.__version__
+openai_source = Path("/AstrBot/astrbot/core/provider/sources/openai_source.py").read_text(encoding="utf-8")
+default_config = Path("/AstrBot/astrbot/core/config/default.py").read_text(encoding="utf-8")
+assert openai_source.count("max_retries=self.openai_sdk_max_retries,") == 2
+assert openai_source.count('provider_config.get("openai_sdk_max_retries", 2)') == 1
+assert default_config.count('"openai_sdk_max_retries": {') == 1
 for name, expected in {
     "jsonpickle": "4.1.2",
     "networkx": "3.6.1",
