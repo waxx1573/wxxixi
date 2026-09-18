@@ -40,8 +40,8 @@ function Save-State($State) {
 
 function Get-RunningProcessPath([string[]]$Names) {
     foreach ($name in $Names) {
-        $process = Get-Process -Name $name -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($process) {
+        $processes = @(Get-Process -Name $name -ErrorAction SilentlyContinue)
+        foreach ($process in $processes) {
             try {
                 $path = $process.Path
                 if ($path -and (Test-Path -LiteralPath $path)) { return $path }
@@ -104,8 +104,9 @@ function Find-BridgeDirectory($State) {
     return $candidates[0]
 }
 
-function Find-Python($State) {
-    $candidates = @($State.python, (Get-Command py.exe -ErrorAction SilentlyContinue).Source, (Get-Command python.exe -ErrorAction SilentlyContinue).Source)
+function Find-Python($State, [string]$BridgeDir) {
+    $projectPython = if ($BridgeDir) { Join-Path $BridgeDir '.venv\Scripts\python.exe' } else { $null }
+    $candidates = @($projectPython, $State.python, (Get-Command py.exe -ErrorAction SilentlyContinue).Source, (Get-Command python.exe -ErrorAction SilentlyContinue).Source)
     foreach ($candidate in ($candidates | Where-Object { $_ } | Select-Object -Unique)) {
         try {
             $pythonExe = $candidate
@@ -143,10 +144,16 @@ import sys
 import uiautomation as auto
 
 auto.SetGlobalSearchTimeout(1)
-window = auto.WindowControl(searchDepth=3, Name='WeChat', searchInterval=0.2)
-ready = window.Exists(1)
-for automation_id in ('main_tabbar', 'main_window_main_splitter_view', 'main_window_sub_splitter_view'):
-    ready = ready and window.Control(searchDepth=10, AutomationId=automation_id).Exists(1)
+ready = False
+for window in auto.GetRootControl().GetChildren():
+    if window.ClassName not in ('mmui::MainWindow', 'WeChatMainWndForPC'):
+        continue
+    if window.Name not in ('微信', 'WeChat'):
+        continue
+    controls = ('main_tabbar', 'main_window_main_splitter_view', 'main_window_sub_splitter_view')
+    if all(window.Control(searchDepth=24, AutomationId=value).Exists(0.5) for value in controls):
+        ready = True
+        break
 sys.exit(0 if ready else 1)
 '@
     try {
@@ -269,7 +276,7 @@ try {
     $wechat = Find-Executable @('Weixin', 'WeChat') $state.wechat
     $weflow = Find-Executable @('WeFlow') $state.weflow
     $bridgeDir = Find-BridgeDirectory $state
-    $python = Find-Python $state
+    $python = Find-Python $state $bridgeDir
 
     if ($wechat) { $state | Add-Member NoteProperty wechat $wechat -Force }
     if ($weflow) { $state | Add-Member NoteProperty weflow $weflow -Force }

@@ -75,6 +75,39 @@ class TextBridgeTests(unittest.TestCase):
             self.assertIn('follow up', events[1]['raw_message'])
             self.assertEqual(timer.call_count, 2)
 
+    def test_sse_events_without_stable_id_are_not_collapsed(self):
+        first = dict(self.data, content='first', timestamp=100)
+        second = dict(self.data, content='second', timestamp=101)
+        self.assertFalse(self.bridge._is_duplicate_sse_event(first))
+        self.assertFalse(self.bridge._is_duplicate_sse_event(second))
+        self.assertTrue(self.bridge._is_duplicate_sse_event(first))
+
+    def test_sse_events_without_any_identity_are_not_deduplicated(self):
+        data = dict(self.data)
+        self.assertFalse(self.bridge._is_duplicate_sse_event(data))
+        self.assertFalse(self.bridge._is_duplicate_sse_event(data))
+
+    def test_offline_event_enters_bounded_retry_queue(self):
+        event = {'message_id': 1}
+        with patch.object(self.bridge, '_start_event_retry_worker') as start:
+            self.assertTrue(self.bridge._queue_event_retry(event, 'TestGroup'))
+        queued_event, contact, queued_at = self.bridge._event_retry_queue.get_nowait()
+        self.bridge._event_retry_queue.task_done()
+        self.assertIs(queued_event, event)
+        self.assertEqual(contact, 'TestGroup')
+        self.assertIsInstance(queued_at, float)
+        start.assert_called_once_with()
+
+    def test_event_retry_drops_messages_older_than_fifteen_minutes(self):
+        self.bridge._event_retry_queue.put((
+            {'message_id': 1}, 'TestGroup', bridge_core.time.monotonic() - 901,
+        ))
+        state.running = False
+        with patch.object(bridge_core, 'push_event') as push:
+            self.bridge._event_retry_loop()
+        push.assert_not_called()
+        self.assertEqual(self.bridge._event_retry_queue.unfinished_tasks, 0)
+
     def test_raw_group_identity_resolves_reply_target(self):
         response = Mock()
         response.json.return_value = {"data": [{"username": "group@chatroom", "nickname": "Actual Group"},
@@ -676,6 +709,44 @@ class TextBridgeTests(unittest.TestCase):
         response = __import__('json').loads(state._ob_ws.send.await_args.args[0])
         self.assertEqual(response['retcode'], 0)
 
+    def test_uia_session_exception_before_input_is_retryable(self):
+        sender = UiaSender.__new__(UiaSender)
+        sender._lock = __import__('threading').Lock()
+
+        class BrokenSession:
+            def __enter__(self):
+                raise RuntimeError('COM unavailable')
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+        sender._automation_session = lambda: BrokenSession()
+        sender._window = Mock()
+        sender._ready = True
+        sender._target_contact = 'stale'
+        sender._target_session = 'stale-session'
+        self.assertFalse(sender.send_text('TestGroup', 'hello'))
+        self.assertTrue(sender.last_failure_retryable)
+        self.assertEqual(sender.last_send_phase, 'before_input')
+        self.assertFalse(sender._ready)
+        self.assertIsNone(sender._window)
+
+    def test_uncertain_submit_uses_readback_without_resending(self):
+        state._ob_ws = types.SimpleNamespace(send=AsyncMock())
+        state._ob_id_to_contact[456] = 'TestGroup'
+        sender = Mock(last_failure_retryable=False, last_send_phase='submitting')
+        sender.send_text.return_value = False
+        state.sender_instance = sender
+        with patch.object(ob_protocol, '_verify_text_delivery', return_value=True) as verify:
+            asyncio.run(ob_protocol._handle_ob_api(dict(
+                action='send_group_msg_verified', echo='uncertain',
+                params={'group_id': '456', 'message': [{'type': 'text', 'data': {'text': 'notice'}}]},
+            )))
+        sender.send_text.assert_called_once_with('TestGroup', 'notice')
+        verify.assert_called_once()
+        response = __import__('json').loads(state._ob_ws.send.await_args.args[0])
+        self.assertEqual(response['retcode'], 0)
+
     def test_failed_contact_switch_never_pastes_or_caches(self):
         sender = UiaSender.__new__(UiaSender)
         sender._lock = __import__('threading').Lock()
@@ -736,6 +807,28 @@ class TextBridgeTests(unittest.TestCase):
         sender._auto.ShowWindow.assert_called_once_with(123, sender._auto.SW.Restore)
         sender._auto.BringWindowToTop.assert_called_once_with(123)
         sender._auto.SetForegroundWindow.assert_called_once_with(123)
+
+    def test_existing_wechat_process_prevents_second_launch(self):
+        sender = UiaSender.__new__(UiaSender)
+        sender._launch_attempted_at = 0
+        sender._window = None
+        sender._find_window = Mock()
+        sender._restore_running_wechat = Mock(return_value=True)
+        with patch.object(sender, '_wechat_process_running', return_value=True), \
+             patch('uia_sender.subprocess.Popen') as popen:
+            sender._launch_wechat()
+        popen.assert_not_called()
+        sender._restore_running_wechat.assert_called_once_with()
+
+    def test_running_wechat_is_restored_from_tray(self):
+        sender = UiaSender.__new__(UiaSender)
+        sender._auto = Mock()
+        sender._window = None
+        sender._find_window = Mock(side_effect=lambda: setattr(sender, '_window', Mock()))
+        with patch('uia_sender.time.sleep'):
+            self.assertTrue(sender._restore_running_wechat())
+        sender._auto.SendKeys.assert_called_once_with('{Ctrl}{Alt}w')
+        sender._find_window.assert_called_once_with()
 
     def contact_sender(self):
         sender = UiaSender.__new__(UiaSender)

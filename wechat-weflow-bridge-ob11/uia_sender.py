@@ -66,6 +66,8 @@ class UiaSender(BaseSender):
         self._session_lookup = session_lookup
         self._target_contact = ""
         self._target_session = ""
+        self.last_failure_retryable = False
+        self.last_send_phase = "idle"
 
         self._init()
 
@@ -95,6 +97,10 @@ class UiaSender(BaseSender):
         now = time.time()
         if now - self._launch_attempted_at < 30:
             return
+        if self._wechat_process_running():
+            log.info("微信进程已运行，正在唤回现有登录窗口，不启动第二个实例")
+            self._restore_running_wechat()
+            return
         if not os.path.isfile(self.WECHAT_EXECUTABLE):
             log.warning("未找到微信程序: %s", self.WECHAT_EXECUTABLE)
             return
@@ -109,6 +115,40 @@ class UiaSender(BaseSender):
                     return
         except Exception as exc:
             log.error("自动启动微信失败: %s", type(exc).__name__)
+
+    def _restore_running_wechat(self):
+        """Restore the logged-in main window from the tray."""
+        if self._auto is None:
+            return False
+        try:
+            self._auto.SendKeys('{Ctrl}{Alt}w')
+            for _ in range(10):
+                time.sleep(0.2)
+                self._find_window()
+                if self._window:
+                    log.info("已唤回现有微信主窗口")
+                    return True
+        except Exception as exc:
+            log.error("唤回微信主窗口失败: %s", type(exc).__name__)
+        return False
+
+    @staticmethod
+    def _wechat_process_running():
+        """Check every desktop-client process before starting another instance."""
+        for image_name in ("Weixin.exe", "WeChat.exe"):
+            try:
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {image_name}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if result.returncode == 0 and f'"{image_name}"'.casefold() in result.stdout.casefold():
+                return True
+        return False
 
     def _find_window(self):
         """只接受已支持的微信主窗口，不匹配搜一搜等附属窗口。"""
@@ -135,6 +175,15 @@ class UiaSender(BaseSender):
                 yield
             finally:
                 self._window = None
+
+    def _discard_automation_state(self):
+        """Drop UIA controls that may be invalid after a COM failure."""
+        self._window = None
+        self._input_control = None
+        self._active_hwnd = None
+        self._target_contact = ""
+        self._target_session = ""
+        self._ready = False
 
     def _ensure_window(self) -> bool:
         """确保窗口可用"""
@@ -376,6 +425,23 @@ class UiaSender(BaseSender):
     # ================================================================
 
     def send_text(self, contact: str, text: str) -> bool:
+        self.last_failure_retryable = False
+        self.last_send_phase = "before_input"
+        try:
+            return self._send_text_once(contact, text)
+        except Exception as exc:
+            phase = self.last_send_phase
+            self.last_failure_retryable = phase == "before_input"
+            self._discard_automation_state()
+            log.error(
+                "[UIA] text send failed: %s phase=%s error=%s",
+                contact,
+                phase,
+                type(exc).__name__,
+            )
+            return False
+
+    def _send_text_once(self, contact: str, text: str) -> bool:
         """
         发送文本消息。
 
@@ -428,19 +494,30 @@ class UiaSender(BaseSender):
 
                 # Ctrl+V 粘贴
                 self._send_keys('{Ctrl}v', getattr(self, '_input_control', None))
+                self.last_send_phase = "pasted"
 
                 # 根据消息长度动态等待粘贴完成（长文本多等一会）
                 paste_wait = min(len(text) * 0.02, 2.0) + random.uniform(0.3, 0.8)
                 time.sleep(paste_wait)
 
                 # Enter 发送
+                self.last_send_phase = "submitting"
                 self._send_keys('{Enter}', getattr(self, '_input_control', None))
+                self.last_send_phase = "submitted"
 
                 log.info("微信按键操作完成，等待消息回读: %s", contact)
                 return True
 
-            except Exception as e:
-                log.error(f"[UIA✗] {contact}: {e}")
+            except Exception as exc:
+                phase = self.last_send_phase
+                self.last_failure_retryable = phase == "before_input"
+                self._discard_automation_state()
+                log.error(
+                    "[UIA] text input failed: %s phase=%s error=%s",
+                    contact,
+                    phase,
+                    type(exc).__name__,
+                )
                 return False
 
     # ================================================================

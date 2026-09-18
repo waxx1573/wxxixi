@@ -9,4 +9,6 @@
 
 启动器不固定微信、WeFlow 或桥接项目的安装路径。发现结果缓存到 `%LOCALAPPDATA%\Akasha-WeChat\launcher-state.json`，只保存可执行文件路径和桥接目录，不保存桥接配置、Token、聊天内容或日志。
 
+如果桥接目录存在 `.venv\Scripts\python.exe`，启动器会优先使用项目虚拟环境；否则才回退到已缓存或系统 Python。
+
 首次排查环境时可双击 `diagnose.cmd`。它只发现依赖，不启动程序。日常管理使用 AstrBot 插件页面；桥接网页仅作为独立排障入口。

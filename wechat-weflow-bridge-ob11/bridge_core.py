@@ -116,8 +116,80 @@ class WeFlowBridge:
         self._recent_seen = {}
         self._sent_recently = {}
         self._sse_event_keys = {}
+        self._event_retry_queue = queue.Queue(maxsize=500)
+        self._event_retry_thread = None
+        self._event_retry_lock = threading.Lock()
         self._pending_image = {}  # talkerId → {"caption": None|str, "event": threading.Event()}
         self._pending_mention_images = {}  # session_id → {"data": data, "time": timestamp} 先图后文暂存
+
+    def _is_duplicate_sse_event(self, data):
+        """Deduplicate only when WeFlow supplies a stable or timestamped identity."""
+        stable_id = str(
+            data.get("rawid") or data.get("serverId") or data.get("serverIdRaw")
+            or data.get("localId") or ""
+        ).strip()
+        if stable_id:
+            key = "id:" + stable_id
+        else:
+            stamp = data.get("timestamp") or data.get("createTime")
+            if stamp in (None, "", 0, "0"):
+                return False
+            key = "fallback:" + "\x1f".join(str(data.get(field, "")) for field in (
+                "sessionId", "talkerId", "senderName", "sourceName", "content", "type", "msgType"
+            )) + f"\x1f{stamp}"
+
+        now = time.monotonic()
+        if len(self._sse_event_keys) >= 4096:
+            cutoff = now - 600
+            self._sse_event_keys = {
+                event_key: seen_at for event_key, seen_at in self._sse_event_keys.items()
+                if seen_at >= cutoff
+            }
+        if key in self._sse_event_keys:
+            return True
+        self._sse_event_keys[key] = now
+        return False
+
+    def _start_event_retry_worker(self):
+        with self._event_retry_lock:
+            if self._event_retry_thread and self._event_retry_thread.is_alive():
+                return
+            self._event_retry_thread = threading.Thread(
+                target=self._event_retry_loop,
+                daemon=True,
+                name="ob11-event-retry",
+            )
+            self._event_retry_thread.start()
+
+    def _queue_event_retry(self, event, contact):
+        try:
+            self._event_retry_queue.put_nowait((event, contact, time.monotonic()))
+        except queue.Full:
+            log.error("[OB11] 待补推队列已满，无法保留新消息 [%s]", contact)
+            return False
+        self._start_event_retry_worker()
+        log.warning("[OB11] AstrBot 暂时离线，消息已进入补推队列 [%s]", contact)
+        return True
+
+    def _event_retry_loop(self):
+        while state.running or not self._event_retry_queue.empty():
+            try:
+                event, contact, queued_at = self._event_retry_queue.get(timeout=1)
+            except queue.Empty:
+                continue
+            delivered = False
+            try:
+                while state.running and time.monotonic() - queued_at < 900:
+                    state._ob_ws_ready.wait(5)
+                    if push_event(event):
+                        log.info("✅ AstrBot 重连后补推成功 [%s]", contact)
+                        delivered = True
+                        break
+                    time.sleep(1)
+                if not delivered:
+                    log.error("[OB11] 消息补推超过 15 分钟，停止重试 [%s]", contact)
+            finally:
+                self._event_retry_queue.task_done()
 
     def resolve_group_contact(self, session_id, fallback=""):
         """Resolve UI target by stable WeFlow identity, never by a member name."""
@@ -407,15 +479,13 @@ class WeFlowBridge:
         log.info("[OB11] 入站关联: message_id=%s group_id=%s",
                  event.get("message_id"), event.get("group_id"))
         sent = push_event(event)
-        if sent <= 0 and is_group:
-            for _ in range(12):
-                time.sleep(2.5)
-                sent = push_event(event)
-                if sent > 0:
-                    log.info(f"✅ AstrBot 重连后补推成功 [{contact}]")
-                    break
+        queued = False
+        if not sent:
+            queued = self._queue_event_retry(event, contact)
         if sent > 0:
             log.info(f"✅ 已推送至 {sent} 个 AstrBot 客户端 [{contact}]")
+        elif queued:
+            log.info("⏳ 已保留消息，等待 AstrBot 恢复 [%s]", contact)
         else:
             log.warning(f"⚠️ 无 AstrBot 客户端在线 [{contact}]")
 
@@ -464,10 +534,8 @@ class WeFlowBridge:
                         msg_time = data.get("timestamp", 0)
                         if msg_time < self.start_timestamp:
                             continue
-                        raw_id = data.get("rawid", "")
-                        if raw_id in self.processed_ids:
+                        if self._is_duplicate_sse_event(data):
                             continue
-                        self.processed_ids.add(raw_id)
                         if not self.should_ignore(data):
                             if data.get("sessionType", "") == "group" or "@chatroom" in data.get("sessionId", ""):
                                 content = data.get("content", "")

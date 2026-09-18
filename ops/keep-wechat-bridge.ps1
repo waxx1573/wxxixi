@@ -4,7 +4,12 @@ $bridgeDir = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..\wechat-wefl
 $logPath = Join-Path $PSScriptRoot 'wechat-bridge-watchdog.log'
 $stateDir = Join-Path $env:LOCALAPPDATA 'Akasha-WeChat'
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
-$python = (Get-Command python.exe -ErrorAction Stop).Source
+$projectPython = Join-Path $bridgeDir '.venv\Scripts\python.exe'
+$python = if (Test-Path -LiteralPath $projectPython -PathType Leaf) {
+    $projectPython
+} else {
+    (Get-Command python.exe -ErrorAction Stop).Source
+}
 
 while ($true) {
     $entry = Join-Path $bridgeDir 'main.py'

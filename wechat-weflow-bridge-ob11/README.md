@@ -27,8 +27,11 @@ bridge 以 WebSocket **客户端**连接 AstrBot 的 aiocqhttp **服务端**，�
 ### 1. 安装依赖
 
 ```bash
-pip install -r requirements.txt
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
+
+Windows 启动器和桥接看门狗会优先使用该项目虚拟环境。桥接固定使用 `websockets>=14,<15`，避免全局 Python 的依赖升级影响 AstrBot WebSocket 连接。
 
 ### 2. 配置
 
@@ -112,6 +115,10 @@ Web 控制面板：`http://127.0.0.1:8766`
 本地兼容修复：只有检测到真实昵称提及时才转换为 OneBot `at` 标记；`all` 与 `batch` 模式下的普通消息只转发原始内容，不合成唤醒。OneBot ID 使用 SHA-256 确定性映射，群 ID 基于 WeFlow session ID，重启和群改名后保持一致。由旧随机哈希版本升级时，需要同步更新 AstrBot 插件中明确允许的群 ID。
 
 文本发送器使用已识别微信窗口的原生句柄，并在激活后和每次按键前确认微信仍在前台；激活或切群失败立即停止发送。完成按键后通过 WeFlow 查询目标会话，只有找到本次发送时间附近、正文匹配的 `isSend=1` 记录才日志确认文字已发送。OneBot 当前仍提前确认 API 请求，不能把 API 响应当成送达证据；搜索结果的目标会话校验和图片回读仍未完善。离线回归检查：`python -m unittest discover -s tests -v`。
+
+SSE 仅在存在稳定消息 ID，或存在可组合的时间戳身份时去重；缺少 `rawid` 且没有其他身份的事件不会再被空字符串合并。AstrBot WebSocket 暂时断开时，入站事件进入最多 500 条的补推队列，每条最长保留 15 分钟，并由连接就绪状态唤醒重试。
+
+UIA 文本发送记录输入阶段：输入前的 COM/UIA 异常会清理失效控件，并在桌面空闲后重试；粘贴或提交阶段出现异常时不盲目重发，而是先用 WeFlow 回读确认，避免重复消息。检测到微信进程已存在但主窗口在托盘时，会尝试唤回现有登录窗口，不再启动第二个微信实例。
 
 图片描述可使用 `image_caption_fallbacks` 按顺序尝试备用 OpenAI 兼容接口；每项包含 `api_base`、`api_key` 和 `model`。运行配置含凭据，只保存在已忽略的 `config.json` 中。AstrBot 主回复的备用模型与直接调用的看图、压缩备用模型需要分别配置；当前统一使用 AstrBot 原生 Provider 配置，不再维护独立模型角色插件。
 

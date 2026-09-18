@@ -77,6 +77,9 @@ async def _ob_client_main():
                             log.error(f"[OB11] 处理 API 异常: {e}")
                 finally:
                     ka_task.cancel()
+                    state._ob_ws_ready.clear()
+                    if state._ob_ws is ws:
+                        state._ob_ws = None
 
         except websockets.exceptions.ConnectionClosed:
             log.warning(f"[OB11] 连接断开，5 秒后重连")
@@ -85,9 +88,11 @@ async def _ob_client_main():
         except Exception as e:
             log.error(f"[OB11] 连接异常: {e}")
 
+        state._ob_ws_ready.clear()
         state._ob_ws = None
         if not state.running:
             break
         await asyncio.sleep(5)
 
+    state._ob_ws_ready.clear()
     state._ob_ws = None

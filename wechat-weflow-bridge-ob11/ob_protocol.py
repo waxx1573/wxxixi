@@ -236,7 +236,8 @@ async def _send_formatted_text(contact, text):
         send_started = time.time()
         try:
             sent = await asyncio.to_thread(state.sender_instance.send_text, contact, text)
-            if sent:
+            phase = getattr(state.sender_instance, "last_send_phase", "")
+            if sent or phase in ("pasted", "submitting", "submitted"):
                 sent = await asyncio.to_thread(_verify_text_delivery, contact, text, send_started)
         except Exception as exc:
             sent = False
@@ -385,7 +386,8 @@ async def _handle_ob_api(data: dict):
                         send_started = time.time()
                         try:
                             sent = await asyncio.to_thread(state.sender_instance.send_text, contact, text)
-                            if sent:
+                            phase = getattr(state.sender_instance, "last_send_phase", "")
+                            if sent or phase in ("pasted", "submitting", "submitted"):
                                 sent = await asyncio.to_thread(_verify_text_delivery, contact, text, send_started)
                         except Exception as exc:
                             sent = False
